@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bachelorarbeit</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <p class="count" id="count" aria-live="polite">0</p>
+      <button type="button" id="increment">Add 1</button>
+    </main>
+    <script>
+      const countEl = document.getElementById("count");
+      const incrementBtn = document.getElementById("increment");
+
+      async function loadCount() {
+        const response = await fetch("/api/count");
+        const data = await response.json();
+        countEl.textContent = String(data.count);
+      }
+
+      incrementBtn.addEventListener("click", async () => {
+        const response = await fetch("/api/increment", { method: "POST" });
+        const data = await response.json();
+        countEl.textContent = String(data.count);
+      });
+
+      loadCount();
+    </script>
+  </body>
+</html>

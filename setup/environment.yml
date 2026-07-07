@@ -1,0 +1,6 @@
+name: bachelorarbeit
+channels:
+  - defaults
+dependencies:
+  - python
+  - pip
