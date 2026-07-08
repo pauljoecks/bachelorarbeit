@@ -1,0 +1,20 @@
+26.06.2023 Release v1.2
+- LLT.dll upgraded to 3.9.0.2170
+- Update documentation
+- Integration of sC30xx-430/600
+
+04.04.2022 Release v1.1.1
+- LLT.dll upgraded to 3.9.0.2133
+- Update documentation
+- Added Sensitivity parameter
+
+21.04.21 Release v1.1
+- LLT.dll upgraded to v 3.9.0.2108
+- Added new dll function ConvertContainer2Values
+- Updated documentation
+
+25.05.20 Release v1.0.1
+- LLT.dll upgraded to v 3.9.0.2077
+
+21.10.19 Release v1.0
+- Features copied from C# SDK including support for scanCONTROL 30xx and 25xx

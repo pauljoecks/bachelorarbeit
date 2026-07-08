@@ -1,0 +1,10 @@
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\bin\Debug\TriggerContainer.exe.config
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\bin\Debug\TriggerContainer.exe
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\bin\Debug\TriggerContainer.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\obj\Debug\TriggerContainer.csprojAssemblyReference.cache
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\obj\Debug\TriggerContainer.csproj.CoreCompileInputs.cache
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\obj\Debug\TriggerContainer.exe
+C:\Users\11000573\Desktop\C# SDK\examples\TriggerContainer\obj\Debug\TriggerContainer.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\TriggerContainer.exe.config
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\TriggerContainer.exe
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\TriggerContainer.pdb

@@ -1,0 +1,6 @@
+# Local scan and welding data
+data/scanning/
+data/welding/
+
+# scanCONTROL installers (manually install on each machine)
+scanCONTROL/*.exe

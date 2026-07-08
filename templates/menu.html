@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+
+{% block title %}menu · bachelorarbeit{% endblock %}
+
+{% block content %}
+<div class="menu-table-header">
+  {% if filter_options %}
+  <div class="menu-row-filter">
+    <label class="menu-row-filter-label" for="row-filter-column">Filter</label>
+    <select id="row-filter-column" class="menu-row-filter-select">
+      {% for column in filter_options %}
+      <option value="{{ column }}" {% if column == filter_column %}selected{% endif %}>{{ column }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% endif %}
+  <p class="menu-table-count">{{ table_rows|length }} Einträge mit ausgefüllter Spalte „{{ filter_column }}“</p>
+</div>
+<div class="menu-table-wrapper">
+  {% if table_rows %}
+  <table class="menu-table" id="menu-table">
+    <thead>
+      <tr>
+        {% for column in table_columns %}
+        {% set sort_type = "text" %}
+        {% if column in ["COUNT", "SERIES", "NUMBER"] %}
+        {% set sort_type = "number" %}
+        {% elif column in ["WELDED", "SCANNED"] %}
+        {% set sort_type = "date" %}
+        {% endif %}
+        <th scope="col">
+          <button
+            type="button"
+            class="menu-table-sort"
+            data-sort-index="{{ loop.index0 }}"
+            data-sort-type="{{ sort_type }}"
+          >
+            <span>{{ column }}</span>
+            <span class="menu-table-sort-indicator" aria-hidden="true"></span>
+          </button>
+        </th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in table_rows %}
+      <tr class="menu-table-row" data-id="{{ row.ID }}">
+        {% for column in table_columns %}
+        <td>{{ row[column] }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="menu-table-empty">Keine Einträge mit WELDED-Datum gefunden.</p>
+  {% endif %}
+</div>
+<script>
+  if (sessionStorage.getItem("versuchs-data-changed")) {
+    sessionStorage.removeItem("versuchs-data-changed");
+    window.location.reload();
+  }
+
+  const FILTER_STORAGE_KEY = "menu-filter";
+  const rowFilterColumn = document.getElementById("row-filter-column");
+
+  (function restoreMenuFilter() {
+    const params = new URLSearchParams(window.location.search);
+    const savedFilter = localStorage.getItem(FILTER_STORAGE_KEY);
+
+    if (!params.has("filter") && savedFilter) {
+      params.set("filter", savedFilter);
+      window.location.replace(`/menu?${params.toString()}`);
+      return;
+    }
+
+    if (params.has("filter")) {
+      localStorage.setItem(FILTER_STORAGE_KEY, params.get("filter"));
+    }
+  })();
+
+  if (rowFilterColumn) {
+    rowFilterColumn.addEventListener("change", () => {
+      localStorage.setItem(FILTER_STORAGE_KEY, rowFilterColumn.value);
+      const params = new URLSearchParams(window.location.search);
+      params.set("filter", rowFilterColumn.value);
+      window.location.href = `/menu?${params.toString()}`;
+    });
+  }
+
+  const menuTable = document.getElementById("menu-table");
+
+  if (menuTable) {
+    const tbody = menuTable.querySelector("tbody");
+    const sortButtons = menuTable.querySelectorAll(".menu-table-sort");
+    let activeIndex = -1;
+    let ascending = true;
+
+    function compareValues(a, b, type) {
+      if (type === "number") {
+        const numA = Number.parseFloat(a);
+        const numB = Number.parseFloat(b);
+
+        if (Number.isNaN(numA) && Number.isNaN(numB)) {
+          return 0;
+        }
+        if (Number.isNaN(numA)) {
+          return 1;
+        }
+        if (Number.isNaN(numB)) {
+          return -1;
+        }
+
+        return numA - numB;
+      }
+
+      if (type === "date") {
+        const timeA = Date.parse(a);
+        const timeB = Date.parse(b);
+
+        if (Number.isNaN(timeA) && Number.isNaN(timeB)) {
+          return 0;
+        }
+        if (Number.isNaN(timeA)) {
+          return 1;
+        }
+        if (Number.isNaN(timeB)) {
+          return -1;
+        }
+
+        return timeA - timeB;
+      }
+
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    }
+
+    function updateIndicators() {
+      sortButtons.forEach((button) => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const indicator = button.querySelector(".menu-table-sort-indicator");
+        const isActive = index === activeIndex;
+
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-sort", isActive ? (ascending ? "ascending" : "descending") : "none");
+        indicator.textContent = isActive ? (ascending ? "▲" : "▼") : "";
+      });
+    }
+
+    function sortByColumn(index, type) {
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+
+      rows.sort((rowA, rowB) => {
+        const valueA = rowA.children[index]?.textContent.trim() ?? "";
+        const valueB = rowB.children[index]?.textContent.trim() ?? "";
+        const result = compareValues(valueA, valueB, type);
+        return ascending ? result : -result;
+      });
+
+      rows.forEach((row) => tbody.appendChild(row));
+    }
+
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const type = button.dataset.sortType;
+
+        if (activeIndex === index) {
+          ascending = !ascending;
+        } else {
+          activeIndex = index;
+          ascending = true;
+        }
+
+        sortByColumn(index, type);
+        updateIndicators();
+      });
+    });
+
+    function highlightSelectedRow() {
+      const currentId = document.getElementById("welding-id")?.value;
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.id === currentId);
+      });
+    }
+
+    tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const id = row.dataset.id;
+        if (!id || !window.setExperimentId) {
+          return;
+        }
+
+        window.setExperimentId(id);
+        highlightSelectedRow();
+      });
+    });
+
+    document.getElementById("welding-id")?.addEventListener("id-change", highlightSelectedRow);
+    highlightSelectedRow();
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,865 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  border-bottom: 1px solid #334155;
+  background: #1e293b;
+}
+
+.nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  flex-wrap: wrap;
+}
+
+.nav-links {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.nav-id {
+  display: flex;
+  align-items: center;
+}
+
+.nav-id .field-input-id {
+  width: 5.5rem;
+  padding: 0.55rem 0.75rem;
+  font-size: 1.25rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.nav-excel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.nav-excel-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.nav-excel-input {
+  width: min(28rem, 40vw);
+  padding: 0.55rem 0.85rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  font: inherit;
+  color: #f8fafc;
+  background: #0f172a;
+}
+
+.nav-excel-input::placeholder {
+  color: #64748b;
+}
+
+.nav-excel-input:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 1px;
+}
+
+.nav-excel-button {
+  border: none;
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  color: #0f172a;
+  background: #38bdf8;
+  white-space: nowrap;
+  transition: background-color 120ms ease;
+}
+
+.nav-excel-button:hover:not(:disabled) {
+  background: #7dd3fc;
+}
+
+.nav-excel-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.nav-excel-button:focus-visible {
+  outline: 3px solid #f8fafc;
+  outline-offset: 2px;
+}
+
+.load-status {
+  display: inline-block;
+  min-width: 10rem;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.load-status.idle {
+  color: #94a3b8;
+}
+
+.load-status.loading {
+  color: #94a3b8;
+}
+
+.load-status.success {
+  color: #4ade80;
+}
+
+.load-status.error {
+  color: #f87171;
+}
+
+.nav-link {
+  padding: 0.6rem 1.25rem;
+  border-radius: 999px;
+  font-weight: 600;
+  text-decoration: none;
+  color: #cbd5e1;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.nav-link:hover {
+  color: #f8fafc;
+  background: #334155;
+}
+
+.nav-link.active {
+  color: #0f172a;
+  background: #38bdf8;
+}
+
+.nav-link:focus-visible {
+  outline: 3px solid #f8fafc;
+  outline-offset: 2px;
+}
+
+.app {
+  padding: 2rem;
+}
+
+.menu-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.menu-row-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.menu-row-filter-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.menu-row-filter-select {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  font: inherit;
+  color: #f8fafc;
+  background: #0f172a;
+}
+
+.menu-row-filter-select:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 1px;
+}
+
+.menu-table-count {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #94a3b8;
+}
+
+.menu-table-wrapper {
+  width: 100%;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  background: #1e293b;
+}
+
+.menu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.menu-table th,
+.menu-table td {
+  padding: 0.4rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid #334155;
+  white-space: nowrap;
+}
+
+.menu-table th {
+  padding: 0;
+  background: #0f172a;
+}
+
+.menu-table-sort {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.4rem 1rem;
+  border: none;
+  font: inherit;
+  font-weight: 600;
+  color: #94a3b8;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.menu-table-sort:hover {
+  color: #f8fafc;
+  background: #1e293b;
+}
+
+.menu-table-sort.active {
+  color: #38bdf8;
+}
+
+.menu-table-sort-indicator {
+  min-width: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.menu-table-sort:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: -2px;
+}
+
+.menu-table tbody tr:hover {
+  background: #334155;
+}
+
+.menu-table-row {
+  cursor: pointer;
+}
+
+.menu-table-row.selected {
+  background: #334155;
+  outline: 2px solid #38bdf8;
+  outline-offset: -2px;
+}
+
+.menu-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.menu-table-empty {
+  margin: 0;
+  padding: 2rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.app h1 {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.welding-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.welding-params-grid {
+  display: flex;
+  width: 100%;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.welding-params-grid .welding-params-table-wrap {
+  flex: 1 1 12rem;
+  min-width: 11rem;
+}
+
+.welding-params-grid .welding-path-block-wrap {
+  flex: 0 0 auto;
+  display: flex;
+}
+
+.welding-params-table-wrap {
+  flex: 0 1 22rem;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  background: #1e293b;
+  overflow-x: auto;
+}
+
+.welding-params-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.welding-params-table th,
+.welding-params-table td {
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid #334155;
+  vertical-align: middle;
+}
+
+.welding-params-table tbody tr:last-child th,
+.welding-params-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.welding-params-table th {
+  width: 45%;
+  font-weight: 600;
+  color: #94a3b8;
+  background: #0f172a;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.welding-params-table td {
+  width: 55%;
+}
+
+.welding-field-input-compact {
+  width: 100%;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.9rem;
+}
+
+.resolution-button-group {
+  display: flex;
+  gap: 0.35rem;
+  align-items: stretch;
+  width: 100%;
+}
+
+.resolution-option-button {
+  flex: 1 1 0;
+  min-width: 2.4rem;
+  box-sizing: border-box;
+  padding: 0.55rem 0.35rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  background: #0f172a;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.resolution-option-button:hover:not(:disabled):not(.is-active) {
+  border-color: #64748b;
+  background: #1e293b;
+}
+
+.resolution-option-button.is-active {
+  color: #0f172a;
+  background: #38bdf8;
+  border-color: #38bdf8;
+}
+
+.resolution-option-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.resolution-button-group-disabled .resolution-option-button.is-active {
+  color: #94a3b8;
+  background: #334155;
+  border-color: #475569;
+}
+
+.scan-duration-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto;
+  gap: 0.35rem;
+  align-items: stretch;
+  width: 100%;
+}
+
+.scan-duration-input {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.scan-duration-control .scan-duration-input.field-input-readonly {
+  min-width: 0;
+}
+
+.scan-duration-auto-button {
+  grid-column: 2;
+  grid-row: 1;
+  box-sizing: border-box;
+  min-width: 3.6rem;
+  padding: 0.53rem 0.55rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  background: #0f172a;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.scan-duration-auto-button:hover:not(:disabled):not(.is-active) {
+  border-color: #64748b;
+  background: #1e293b;
+}
+
+.scan-duration-auto-button.is-active {
+  color: #0f172a;
+  background: #38bdf8;
+  border-color: #38bdf8;
+}
+
+.scan-duration-auto-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.scan-duration-auto-button:disabled.is-active {
+  color: #94a3b8;
+  background: #334155;
+  border-color: #475569;
+}
+
+.welding-comment-field {
+  width: 100%;
+}
+
+.welding-comment-input {
+  width: 100%;
+}
+
+.welding-action-button {
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 1rem 1.5rem;
+  border: none;
+  border-radius: 0.75rem;
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  color: #0f172a;
+  background: #38bdf8;
+  transition: background-color 120ms ease, opacity 120ms ease;
+}
+
+.welding-action-button:hover:not(:disabled) {
+  background: #7dd3fc;
+}
+
+.welding-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  color: #94a3b8;
+  background: #334155;
+}
+
+.welding-action-button:focus-visible {
+  outline: 3px solid #f8fafc;
+  outline-offset: 2px;
+}
+
+.welding-action-button-compact {
+  margin-top: 0.5rem;
+  padding: 0.55rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f8fafc;
+  background: #475569;
+}
+
+.welding-action-button-compact:hover:not(:disabled) {
+  background: #64748b;
+}
+
+.welding-action-button-compact:disabled {
+  color: #94a3b8;
+  background: #334155;
+}
+
+.welding-path-block {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  width: 100%;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.welding-path-image-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  width: 100%;
+  padding: 0.75rem;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid #334155;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.welding-path-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem;
+  background:
+    linear-gradient(135deg, #1e293b 0%, #0f172a 100%),
+    repeating-linear-gradient(
+      -45deg,
+      transparent,
+      transparent 0.75rem,
+      rgba(148, 163, 184, 0.08) 0.75rem,
+      rgba(148, 163, 184, 0.08) 1.5rem
+    );
+}
+
+.welding-path-placeholder[hidden] {
+  display: none;
+}
+
+.welding-path-placeholder-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #64748b;
+  text-align: center;
+}
+
+.welding-path-image {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-sizing: border-box;
+  background: transparent;
+}
+
+.welding-path-image[hidden] {
+  display: none;
+}
+
+.welding-path-input {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border: none;
+  border-radius: 0;
+  text-align: center;
+  letter-spacing: 0.1em;
+  background: #0f172a;
+}
+
+.welding-path-input::placeholder {
+  color: #94a3b8;
+  font-weight: 600;
+  letter-spacing: normal;
+}
+
+.welding-path-input:focus {
+  outline: none;
+  background: #1e293b;
+}
+
+.welding-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.welding-path-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 0 1 16.8rem;
+}
+
+.welding-layout .welding-path-image-wrap {
+  flex: 0 1 auto;
+  width: min(100%, 16.8rem);
+  aspect-ratio: 1;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+}
+
+.welding-field-path {
+  width: 100%;
+  align-items: center;
+  text-align: center;
+}
+
+.welding-field-path-id {
+  width: 5rem;
+  max-width: none;
+  text-align: center;
+  letter-spacing: 0.1em;
+}
+
+.welding-graph-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #334155;
+}
+
+.welding-graph-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.welding-graph-header-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.welding-live-readings {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.welding-live-reading {
+  font-size: 0.95rem;
+  color: #cbd5e1;
+  white-space: nowrap;
+}
+
+.welding-live-reading strong {
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.welding-live-reading-current strong {
+  color: #38bdf8;
+}
+
+.welding-live-reading-voltage strong {
+  color: #fbbf24;
+}
+
+.welding-graph-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.welding-graph-status {
+  margin: 0;
+  min-height: 1.25rem;
+  font-size: 0.9rem;
+  color: #94a3b8;
+}
+
+.welding-graph-status.loading {
+  color: #94a3b8;
+}
+
+.welding-graph-status.error {
+  color: #f87171;
+}
+
+.welding-graph-wrap {
+  height: 22rem;
+  padding: 1rem;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  background: #1e293b;
+}
+
+.scanning-graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.scanning-profile-label {
+  font-size: 0.9rem;
+  color: #94a3b8;
+}
+
+.scanning-profile-slider {
+  flex: 1 1 12rem;
+  min-width: 10rem;
+  accent-color: #38bdf8;
+}
+
+.scanning-profile-value {
+  min-width: 5.5rem;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+  font-variant-numeric: tabular-nums;
+}
+
+.welding-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.welding-field-input {
+  width: 100%;
+}
+
+.welding-form-status {
+  margin: 0;
+  min-height: 1.25rem;
+  font-size: 0.875rem;
+}
+
+.welding-form-status:empty {
+  min-height: 0;
+}
+
+.welding-form-status.loading {
+  color: #94a3b8;
+}
+
+.welding-form-status.error {
+  color: #f87171;
+}
+
+.welding-form-status.success {
+  color: #4ade80;
+}
+
+.welding-lookup {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.field-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.field-input {
+  padding: 0.55rem 0.85rem;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  font: inherit;
+  color: #f8fafc;
+  background: #0f172a;
+}
+
+.field-input-id {
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-input-shell-id {
+  position: relative;
+  display: inline-block;
+}
+
+.field-input-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #64748b;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.field-input-id:not(:placeholder-shown) + .field-input-hint,
+.field-input-shell-id.has-value .field-input-hint {
+  opacity: 0;
+}
+
+.field-input-readonly {
+  min-width: 12rem;
+  color: #cbd5e1;
+  background: #1e293b;
+  cursor: default;
+}
+
+.field-input:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 1px;
+}

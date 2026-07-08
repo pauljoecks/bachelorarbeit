@@ -1,0 +1,1258 @@
+{% extends "base.html" %}
+
+{% block title %}scanning · bachelorarbeit{% endblock %}
+
+{% block content %}
+<section class="welding-form" aria-label="Scanning parameters">
+  <div class="welding-params-grid">
+    {% for block in scanning_param_table_columns %}
+    <div class="welding-params-table-wrap">
+      <table class="welding-params-table">
+        <tbody>
+          {% for field in block %}
+          <tr>
+            <th scope="row">{{ field }}</th>
+            <td>
+              {% if field == "RESOLUTION" %}
+              <div class="resolution-button-group" role="group" aria-label="RESOLUTION">
+                <input
+                  type="hidden"
+                  class="welding-field-input resolution-value-input"
+                  data-field="RESOLUTION"
+                  value=""
+                />
+                {% for resolution in resolution_options %}
+                <button
+                  type="button"
+                  class="resolution-option-button"
+                  data-resolution="{{ resolution }}"
+                  aria-pressed="false"
+                >{{ resolution }}</button>
+                {% endfor %}
+              </div>
+              {% elif field == "SCANDURATION" %}
+              <div class="scan-duration-control">
+                <input
+                  type="text"
+                  class="field-input welding-field-input welding-field-input-compact scan-duration-input"
+                  data-field="SCANDURATION"
+                  spellcheck="false"
+                />
+                <button
+                  type="button"
+                  class="scan-duration-auto-button"
+                  aria-pressed="false"
+                >AUTO</button>
+              </div>
+              {% else %}
+              <input
+                type="text"
+                class="field-input welding-field-input welding-field-input-compact{% if field not in scanning_editable_param_columns %} field-input-readonly{% endif %}"
+                data-field="{{ field }}"
+                {% if field not in scanning_editable_param_columns %}readonly tabindex="-1"{% endif %}
+                spellcheck="false"
+              />
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+    <div class="welding-path-block-wrap">
+      <div class="welding-path-block">
+        <figure class="welding-path-image-wrap">
+          <div id="scanning-path-placeholder" class="welding-path-placeholder">
+            <span class="welding-path-placeholder-text">Pfad-Vorschau</span>
+          </div>
+          <img id="scanning-path-image" class="welding-path-image" alt="" hidden />
+        </figure>
+        <input
+          type="text"
+          id="scanning-field-path-id"
+          class="field-input field-input-readonly welding-field-input welding-path-input"
+          data-field="PATH ID"
+          placeholder="PATH ID"
+          aria-label="PATH ID"
+          readonly
+          tabindex="-1"
+        />
+      </div>
+    </div>
+  </div>
+  <div class="welding-field welding-comment-field">
+    <label class="field-label" for="scanning-field-comment">COMMENT</label>
+    <input
+      type="text"
+      id="scanning-field-comment"
+      class="field-input welding-field-input welding-comment-input"
+      data-field="COMMENT"
+      spellcheck="false"
+    />
+  </div>
+  <button type="button" id="scanning-action-button" class="welding-action-button" disabled>
+    START SCANNING
+  </button>
+  <button type="button" id="scanning-reset-button" class="welding-action-button welding-action-button-compact" disabled>
+    SCAN ZURÜCKSETZEN
+  </button>
+  <p id="scanning-form-status" class="welding-form-status" aria-live="polite"></p>
+</section>
+<section class="welding-graph-section" aria-label="Scan profile graph">
+  <div class="welding-graph-header">
+    <h2 class="welding-graph-title">Scan-Profil</h2>
+    <p id="scanning-graph-status" class="welding-graph-status" aria-live="polite"></p>
+  </div>
+  <div class="scanning-graph-controls">
+    <label class="scanning-profile-label" for="scanning-profile-slider">Profil</label>
+    <input
+      type="range"
+      id="scanning-profile-slider"
+      class="scanning-profile-slider"
+      min="0"
+      max="0"
+      value="0"
+      step="1"
+      disabled
+    />
+    <output id="scanning-profile-value" class="scanning-profile-value" for="scanning-profile-slider">0 / 0</output>
+  </div>
+  <div class="welding-graph-wrap">
+    <canvas id="scanning-graph-canvas"></canvas>
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<script>
+  const idInput = document.getElementById("welding-id");
+  const statusEl = document.getElementById("scanning-form-status");
+  const fieldInputs = document.querySelectorAll(".welding-field-input");
+  const pathImage = document.getElementById("scanning-path-image");
+  const pathImagePlaceholder = document.getElementById("scanning-path-placeholder");
+  const scanningActionButton = document.getElementById("scanning-action-button");
+  const scanningResetButton = document.getElementById("scanning-reset-button");
+  const graphStatusEl = document.getElementById("scanning-graph-status");
+  const graphCanvas = document.getElementById("scanning-graph-canvas");
+  const profileSlider = document.getElementById("scanning-profile-slider");
+  const profileValue = document.getElementById("scanning-profile-value");
+  const PATH_ID_OPTIONS = new Set(["SO", "PO", "SI", "ME", "LI"]);
+  const SCAN_SETTINGS_REQUIRED = {{ scan_settings_required_columns | tojson }};
+  const SCANNING_EDITABLE_FIELDS = {{ scanning_editable_columns | tojson }};
+  const RESOLUTION_OPTIONS = {{ resolution_options | tojson }};
+  const SCAN_DURATION_AUTO_SECONDS = {{ scan_duration_auto_seconds | tojson }};
+  let scanningChart = null;
+  let isLoadingGraph = false;
+  let livePreviewActive = false;
+  let livePreviewRequest = null;
+  let livePreviewFetching = false;
+  let activeLiveSettingsQuery = "";
+  let liveSettingsDebounceTimer = null;
+  const LIVE_PREVIEW_DELAY_MS = 250;
+  const LIVE_SETTINGS_DEBOUNCE_MS = 600;
+  let isLoadingFields = false;
+  let isStartingScan = false;
+  let isResettingScan = false;
+  let currentIsScanned = false;
+  let isSavingFields = false;
+  let savedScanSettings = {};
+  let lastManualScanDuration = "";
+  let scanDurationAutoActive = false;
+
+  function getScanDurationAutoButton() {
+    return document.querySelector(".scan-duration-auto-button");
+  }
+
+  function isScanDurationAuto() {
+    return scanDurationAutoActive;
+  }
+
+  function getScanDurationAutoStorageKey(id) {
+    return `scanning-scan-duration-auto:${String(id).trim().toUpperCase()}`;
+  }
+
+  function persistScanDurationAuto(id = idInput?.value ?? "") {
+    const normalizedId = String(id).trim().toUpperCase();
+    if (normalizedId.length !== 3) {
+      return;
+    }
+
+    sessionStorage.setItem(
+      getScanDurationAutoStorageKey(normalizedId),
+      scanDurationAutoActive ? "1" : "0",
+    );
+  }
+
+  function restoreScanDurationAuto(id) {
+    const normalizedId = String(id).trim().toUpperCase();
+    if (normalizedId.length !== 3) {
+      setScanDurationAuto(false, { preserveManual: true, skipPersist: true });
+      return;
+    }
+
+    const stored = sessionStorage.getItem(getScanDurationAutoStorageKey(normalizedId));
+    setScanDurationAuto(stored === "1", { preserveManual: true, skipPersist: true });
+  }
+
+  function syncScanDurationControl(isScanned = currentIsScanned) {
+    const field = getFieldByName("SCANDURATION");
+    const autoButton = getScanDurationAutoButton();
+    const inputLocked = isScanned || isScanDurationAuto();
+
+    if (field) {
+      field.readOnly = inputLocked;
+      field.tabIndex = inputLocked ? -1 : 0;
+      field.classList.toggle("field-input-readonly", inputLocked);
+    }
+
+    if (autoButton) {
+      autoButton.disabled = isScanned;
+      autoButton.classList.toggle("is-active", isScanDurationAuto());
+      autoButton.setAttribute("aria-pressed", isScanDurationAuto() ? "true" : "false");
+    }
+  }
+
+  function setScanDurationAuto(active, options = {}) {
+    const preserveManual = Boolean(options.preserveManual);
+    const field = getFieldByName("SCANDURATION");
+    scanDurationAutoActive = Boolean(active);
+
+    if (field && !preserveManual) {
+      if (scanDurationAutoActive) {
+        const current = field.value.trim();
+        if (current && current.toUpperCase() !== "AUTO") {
+          lastManualScanDuration = current;
+        }
+      } else if (lastManualScanDuration && !field.value.trim()) {
+        field.value = lastManualScanDuration;
+      }
+    }
+
+    syncScanDurationControl(currentIsScanned);
+    if (!options.skipPersist) {
+      persistScanDurationAuto();
+    }
+  }
+
+  function getResolutionButtons() {
+    return document.querySelectorAll(".resolution-option-button");
+  }
+
+  function syncResolutionButtons(value, disabled = currentIsScanned) {
+    const normalized = String(value ?? "").trim();
+    const group = document.querySelector(".resolution-button-group");
+
+    if (group) {
+      group.classList.toggle("resolution-button-group-disabled", disabled);
+    }
+
+    getResolutionButtons().forEach((button) => {
+      const isActive = button.dataset.resolution === normalized;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+      button.disabled = disabled;
+    });
+  }
+
+  function setResolutionValue(value) {
+    const field = getFieldByName("RESOLUTION");
+    if (field) {
+      field.value = value ?? "";
+    }
+    syncResolutionButtons(field?.value ?? "", currentIsScanned);
+  }
+
+  function getFieldByName(name) {
+    return document.querySelector(`[data-field="${name}"]`);
+  }
+
+  function getScanSettingsValues() {
+    const values = {};
+    SCAN_SETTINGS_REQUIRED.forEach((name) => {
+      const field = getFieldByName(name);
+      values[name] = field?.value.trim() ?? "";
+    });
+    return values;
+  }
+
+  function getEffectiveScanDurationS() {
+    if (isScanDurationAuto()) {
+      return SCAN_DURATION_AUTO_SECONDS;
+    }
+
+    const raw = getFieldByName("SCANDURATION")?.value.trim() ?? "";
+    return Number.parseFloat(String(raw).replace(",", "."));
+  }
+
+  function buildScanSettingsPayload() {
+    const values = getScanSettingsValues();
+    return {
+      resolution: Number.parseInt(values.RESOLUTION, 10),
+      profile_frequency: Number.parseFloat(String(values.PROFILEFREQUENCY).replace(",", ".")),
+      exposure_us: Number.parseInt(values.EXPOSURE, 10),
+      scan_duration_auto: isScanDurationAuto(),
+      scan_duration_s: getEffectiveScanDurationS(),
+    };
+  }
+
+  function areScanSettingsComplete() {
+    return SCAN_SETTINGS_REQUIRED.every((name) => {
+      if (name === "SCANDURATION" && isScanDurationAuto()) {
+        return true;
+      }
+      return getScanSettingsValues()[name] !== "";
+    });
+  }
+
+  function captureSavedScanSettings() {
+    savedScanSettings = getScanSettingsValues();
+  }
+
+  function isScanSettingsSaved() {
+    const current = getScanSettingsValues();
+    return SCAN_SETTINGS_REQUIRED.every((name) => {
+      if (name === "SCANDURATION" && isScanDurationAuto()) {
+        return true;
+      }
+      return current[name] === savedScanSettings[name];
+    });
+  }
+
+  function clearScanMetadataFields() {
+    const scannedField = getFieldByName("SCANNED");
+    const jsonField = getFieldByName("JSONFILE");
+    if (scannedField) {
+      scannedField.value = "";
+    }
+    if (jsonField) {
+      jsonField.value = "";
+    }
+  }
+
+  function updateScanStartHint() {
+    if (currentIsScanned) {
+      return;
+    }
+
+    if (!areScanSettingsComplete()) {
+      setStatus("Scan-Einstellungen unvollständig.", "error");
+      return;
+    }
+
+    if (!isScanSettingsSaved() || isSavingFields) {
+      setStatus("Scan-Einstellungen ungespeichert – Feld verlassen zum Speichern.", "loading");
+      return;
+    }
+
+    if (
+      statusEl?.textContent === "Scan-Einstellungen unvollständig."
+      || statusEl?.textContent === "Scan-Einstellungen ungespeichert – Feld verlassen zum Speichern."
+    ) {
+      setStatus("", "");
+    }
+  }
+
+  function refreshActiveLiveSettingsQuery() {
+    const nextQuery = getLiveScanSettingsQuery();
+    if (nextQuery) {
+      activeLiveSettingsQuery = nextQuery;
+    }
+  }
+
+  function scheduleActiveLiveSettingsQueryUpdate() {
+    if (liveSettingsDebounceTimer) {
+      clearTimeout(liveSettingsDebounceTimer);
+    }
+
+    liveSettingsDebounceTimer = setTimeout(() => {
+      liveSettingsDebounceTimer = null;
+      refreshActiveLiveSettingsQuery();
+    }, LIVE_SETTINGS_DEBOUNCE_MS);
+  }
+
+  function onScanSettingsChanged() {
+    if (!currentIsScanned) {
+      clearScanMetadataFields();
+    }
+    syncScanningActionButtons();
+    updateScanStartHint();
+    scheduleActiveLiveSettingsQueryUpdate();
+  }
+
+  function syncWeldingPathBlockLayout() {
+    const tableWrap = document.querySelector(".welding-params-table-wrap");
+    const pathBlock = document.querySelector(".welding-path-block");
+    const pathBlockWrap = document.querySelector(".welding-path-block-wrap");
+    const imageWrap = document.querySelector(".welding-path-image-wrap");
+    if (!tableWrap || !pathBlock || !pathBlockWrap || !imageWrap) {
+      return;
+    }
+
+    pathBlockWrap.style.width = "";
+    pathBlock.style.height = `${tableWrap.offsetHeight}px`;
+
+    const imageHeight = imageWrap.getBoundingClientRect().height;
+    if (imageHeight > 0) {
+      pathBlockWrap.style.width = `${Math.round(imageHeight)}px`;
+    }
+  }
+
+  const paramsTableWrap = document.querySelector(".welding-params-table-wrap");
+  if (paramsTableWrap && typeof ResizeObserver !== "undefined") {
+    const pathLayoutObserver = new ResizeObserver(syncWeldingPathBlockLayout);
+    pathLayoutObserver.observe(paramsTableWrap);
+  } else {
+    window.addEventListener("resize", syncWeldingPathBlockLayout);
+  }
+
+  syncWeldingPathBlockLayout();
+
+  if (pathImage) {
+    pathImage.addEventListener("load", syncWeldingPathBlockLayout);
+  }
+
+  function syncScanSettingsFieldLock(isScanned = currentIsScanned) {
+    SCAN_SETTINGS_REQUIRED.forEach((name) => {
+      if (name === "SCANDURATION") {
+        return;
+      }
+
+      const field = getFieldByName(name);
+      if (!field) {
+        return;
+      }
+
+      field.readOnly = isScanned;
+      field.tabIndex = isScanned ? -1 : 0;
+      field.classList.toggle("field-input-readonly", isScanned);
+    });
+
+    syncResolutionButtons(getFieldByName("RESOLUTION")?.value ?? "", isScanned);
+    syncScanDurationControl(isScanned);
+  }
+
+  function syncScanningActionButtons(isScanned = currentIsScanned) {
+    currentIsScanned = Boolean(isScanned);
+    const id = idInput?.value ?? "";
+    const hasValidId = id.length === 3;
+    const scanSettingsReady = (
+      areScanSettingsComplete()
+      && isScanSettingsSaved()
+      && !isSavingFields
+      && !isLoadingFields
+    );
+
+    if (scanningActionButton) {
+      scanningActionButton.disabled = (
+        !hasValidId
+        || currentIsScanned
+        || isResettingScan
+        || isStartingScan
+        || !scanSettingsReady
+      );
+    }
+
+    if (scanningResetButton) {
+      scanningResetButton.disabled = (
+        !hasValidId || !currentIsScanned || isStartingScan || isResettingScan
+      );
+    }
+
+    syncScanSettingsFieldLock(currentIsScanned);
+    updateScanStartHint();
+  }
+
+  function setStatus(message, type) {
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = message;
+    statusEl.className = type ? `welding-form-status ${type}` : "welding-form-status";
+  }
+
+  function formatPointStats(stats) {
+    if (!stats || stats.total_points == null) {
+      return "";
+    }
+
+    return `${stats.invalid_points} von ${stats.total_points} Punkten ungültig`;
+  }
+
+  function setGraphStatus(message, type) {
+    if (!graphStatusEl) {
+      return;
+    }
+
+    graphStatusEl.textContent = message;
+    graphStatusEl.className = type ? `welding-graph-status ${type}` : "welding-graph-status";
+  }
+
+  function destroyScanningChart() {
+    if (scanningChart) {
+      scanningChart.destroy();
+      scanningChart = null;
+    }
+  }
+
+  function updateProfileSlider(profileIndex, profileCount) {
+    if (!profileSlider || !profileValue) {
+      return;
+    }
+
+    const maxIndex = Math.max(profileCount - 1, 0);
+    profileSlider.min = "0";
+    profileSlider.max = String(maxIndex);
+    profileSlider.value = String(Math.min(profileIndex, maxIndex));
+    profileSlider.disabled = profileCount <= 1;
+    profileValue.textContent = `${profileSlider.value} / ${maxIndex}`;
+  }
+
+  function renderScanningChart(data) {
+    if (!graphCanvas || typeof Chart === "undefined") {
+      return;
+    }
+
+    destroyScanningChart();
+
+    const titleText = data.live
+      ? (data.scanning
+        ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
+        : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau"))
+      : data.json_file;
+
+    scanningChart = new Chart(graphCanvas, {
+      type: "line",
+      data: {
+        datasets: [
+          {
+            label: "Höhe z [mm]",
+            data: data.x_mm.map((xValue, index) => ({
+              x: xValue,
+              y: data.z_mm[index],
+            })),
+            borderColor: data.live ? "#34d399" : "#38bdf8",
+            backgroundColor: data.live ? "#34d39933" : "#38bdf833",
+            borderWidth: 1.5,
+            pointRadius: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        animation: false,
+        interaction: {
+          mode: "index",
+          intersect: false,
+        },
+        plugins: {
+          legend: {
+            labels: {
+              color: "#f8fafc",
+            },
+          },
+          title: {
+            display: true,
+            text: titleText,
+            color: "#94a3b8",
+            font: {
+              size: 13,
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: "linear",
+            title: {
+              display: true,
+              text: "x [mm]",
+              color: "#94a3b8",
+            },
+            ticks: {
+              color: "#94a3b8",
+              maxTicksLimit: 8,
+            },
+            grid: {
+              color: "#334155",
+            },
+          },
+          y: {
+            type: "linear",
+            title: {
+              display: true,
+              text: "z [mm]",
+              color: data.live ? "#34d399" : "#38bdf8",
+            },
+            ticks: {
+              color: data.live ? "#34d399" : "#38bdf8",
+            },
+            grid: {
+              color: "#334155",
+            },
+          },
+        },
+      },
+    });
+  }
+
+  function updateLiveProfileChart(data) {
+    if (!graphCanvas || typeof Chart === "undefined") {
+      return;
+    }
+
+    const points = data.x_mm.map((xValue, index) => ({
+      x: xValue,
+      y: data.z_mm[index],
+    }));
+
+    if (!scanningChart) {
+      renderScanningChart(data);
+      return;
+    }
+
+    scanningChart.data.datasets[0].data = points;
+    scanningChart.data.datasets[0].borderColor = "#34d399";
+    scanningChart.data.datasets[0].backgroundColor = "#34d39933";
+    scanningChart.options.plugins.title.text = data.scanning
+      ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
+      : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau");
+    scanningChart.options.scales.y.title.color = "#34d399";
+    scanningChart.options.scales.y.ticks.color = "#34d399";
+    scanningChart.update("none");
+  }
+
+  function buildLiveGraphStatus(data) {
+    const baseLabel = data.scanning
+      ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
+      : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau");
+    const hints = [
+      baseLabel,
+      formatPointStats(data.point_stats),
+    ];
+    if (data.uses_default_settings && !data.scanning) {
+      hints.push("Standard-Scan-Einstellungen");
+    }
+    return hints.filter(Boolean).join(" · ");
+  }
+
+  function getLiveScanSettingsQuery() {
+    const values = getScanSettingsValues();
+    if (!areScanSettingsComplete()) {
+      return "";
+    }
+
+    const resolution = Number.parseInt(values.RESOLUTION, 10);
+    const profileFrequency = Number.parseFloat(String(values.PROFILEFREQUENCY).replace(",", "."));
+    const exposureUs = Number.parseInt(values.EXPOSURE, 10);
+    const scanDurationS = getEffectiveScanDurationS();
+
+    if (
+      !Number.isFinite(resolution)
+      || !RESOLUTION_OPTIONS.includes(resolution)
+      || !Number.isFinite(profileFrequency)
+      || !Number.isFinite(exposureUs)
+      || !Number.isFinite(scanDurationS)
+      || resolution < 1
+      || profileFrequency <= 0
+      || exposureUs < 1
+      || scanDurationS <= 0
+    ) {
+      return "";
+    }
+
+    const idleTimeUs = Math.round(1_000_000 / profileFrequency - exposureUs);
+    if (idleTimeUs < 10) {
+      return "";
+    }
+
+    const params = new URLSearchParams({
+      resolution: String(resolution),
+      profile_frequency: String(profileFrequency),
+      exposure_us: String(exposureUs),
+      scan_duration_s: String(scanDurationS),
+    });
+    return `?${params.toString()}`;
+  }
+
+  async function stopLivePreview(id = idInput?.value ?? "", options = {}) {
+    const closeScanner = options.closeScanner !== false;
+    livePreviewActive = false;
+    if (livePreviewRequest) {
+      livePreviewRequest.abort();
+      livePreviewRequest = null;
+    }
+
+    if (closeScanner && id.length === 3) {
+      try {
+        await fetch(`/api/scanning/${encodeURIComponent(id)}/live-profile/stop`, {
+          method: "POST",
+        });
+      } catch {
+        // ignore stop errors
+      }
+    }
+  }
+
+  async function fetchLiveProfile(id) {
+    if (livePreviewFetching) {
+      return null;
+    }
+
+    livePreviewFetching = true;
+    livePreviewRequest = new AbortController();
+    try {
+      const response = await fetch(
+        `/api/scanning/${encodeURIComponent(id)}/live-profile${activeLiveSettingsQuery}`,
+        { signal: livePreviewRequest.signal }
+      );
+      const data = await response.json();
+
+      if (response.status === 409) {
+        currentIsScanned = true;
+        await stopLivePreview(id);
+        await loadScanningGraph(id, 0, false);
+        syncScanningActionButtons(true);
+        return null;
+      }
+
+      if (response.status === 503) {
+        return {
+          waiting: true,
+          scanning: true,
+          message: data.error || "Scan läuft – warte auf erstes Profil...",
+        };
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "Live-Vorschau fehlgeschlagen.");
+      }
+
+      return data;
+    } finally {
+      livePreviewFetching = false;
+      livePreviewRequest = null;
+    }
+  }
+
+  async function runLivePreviewLoop(id) {
+    while (livePreviewActive && !currentIsScanned) {
+      try {
+        const data = await fetchLiveProfile(id);
+        if (!data || !livePreviewActive || currentIsScanned) {
+          return;
+        }
+
+        if (data.waiting) {
+          setGraphStatus(data.message || "Scan läuft...", "loading");
+        } else {
+          updateProfileSlider(0, 1);
+          if (profileSlider) {
+            profileSlider.disabled = true;
+          }
+          updateLiveProfileChart(data);
+          setGraphStatus(buildLiveGraphStatus(data), "");
+        }
+      } catch (error) {
+        if (error.name === "AbortError") {
+          return;
+        }
+        setGraphStatus(error.message || "Live-Vorschau fehlgeschlagen.", "error");
+      }
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, LIVE_PREVIEW_DELAY_MS);
+      });
+    }
+  }
+
+  async function startLivePreview(id) {
+    if (livePreviewActive) {
+      return;
+    }
+
+    if (!id || id.length !== 3 || currentIsScanned) {
+      return;
+    }
+
+    livePreviewActive = true;
+    refreshActiveLiveSettingsQuery();
+    setGraphStatus("Live-Vorschau wird gestartet...", "loading");
+    runLivePreviewLoop(id);
+  }
+
+  async function syncScanningVisuals(id, profileIndex = 0, showErrors = true) {
+    if (!id || id.length !== 3) {
+      await stopLivePreview(id);
+      clearScanningVisuals();
+      return;
+    }
+
+    if (currentIsScanned) {
+      await stopLivePreview(id);
+      await loadScanningGraph(id, profileIndex, showErrors);
+      return;
+    }
+
+    if (!livePreviewActive) {
+      clearScanningVisuals();
+      await startLivePreview(id);
+    }
+  }
+
+  function clearScanningVisuals() {
+    destroyScanningChart();
+    updateProfileSlider(0, 0);
+    if (profileSlider) {
+      profileSlider.disabled = true;
+    }
+    setGraphStatus("", "");
+  }
+
+  async function loadScanningGraph(id, profileIndex = 0, showErrors = true) {
+    await stopLivePreview(id);
+
+    if (!id || id.length !== 3) {
+      destroyScanningChart();
+      updateProfileSlider(0, 0);
+      if (profileSlider) {
+        profileSlider.disabled = true;
+      }
+      setGraphStatus("", "");
+      return;
+    }
+
+    isLoadingGraph = true;
+    setGraphStatus("Lädt Scan-Profil...", "loading");
+
+    try {
+      const response = await fetch(
+        `/api/scanning/${encodeURIComponent(id)}/graph?profile=${encodeURIComponent(profileIndex)}`
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        destroyScanningChart();
+        updateProfileSlider(0, 0);
+        if (profileSlider) {
+          profileSlider.disabled = true;
+        }
+        setGraphStatus(showErrors ? (data.error || "Keine Scan-Daten.") : "", showErrors ? "error" : "");
+        return;
+      }
+
+      updateProfileSlider(data.profile_index, data.profile_count);
+      renderScanningChart(data);
+      setGraphStatus(
+        [
+          data.demo_mode ? `Demo-Scan · ${data.profile_count} Profile` : `${data.profile_count} Profile`,
+          formatPointStats(data.point_stats),
+        ].filter(Boolean).join(" · "),
+        ""
+      );
+    } catch {
+      destroyScanningChart();
+      updateProfileSlider(0, 0);
+      if (profileSlider) {
+        profileSlider.disabled = true;
+      }
+      setGraphStatus(showErrors ? "Verbindungsfehler." : "", showErrors ? "error" : "");
+    } finally {
+      isLoadingGraph = false;
+    }
+  }
+
+  async function loadScanningVisuals(id, profileIndex = 0, showErrors = true) {
+    await syncScanningVisuals(id, profileIndex, showErrors);
+  }
+
+  async function refreshScanningState(id, profileIndex = 0) {
+    if (!id || id.length !== 3) {
+      await stopLivePreview(id);
+      clearScanningVisuals();
+      syncScanningActionButtons(false);
+      return;
+    }
+
+    await loadScanningFields(id, { preserveStatus: true });
+    await loadScanningVisuals(id, profileIndex, false);
+  }
+
+  function getEditableFieldValues() {
+    const fields = {};
+    const editableFields = currentIsScanned
+      ? SCANNING_EDITABLE_FIELDS.filter((name) => name === "COMMENT")
+      : SCANNING_EDITABLE_FIELDS;
+
+    editableFields.forEach((name) => {
+      if (name === "SCANDURATION" && isScanDurationAuto()) {
+        return;
+      }
+
+      if (SCAN_SETTINGS_REQUIRED.includes(name)) {
+        fields[name] = getScanSettingsValues()[name] ?? "";
+        return;
+      }
+
+      fields[name] = getFieldByName(name)?.value.trim() ?? "";
+    });
+    return fields;
+  }
+
+  function getFieldValues() {
+    const fields = {};
+    fieldInputs.forEach((field) => {
+      fields[field.dataset.field] = field.value;
+    });
+    return fields;
+  }
+
+  function clearScanningFields() {
+    fieldInputs.forEach((field) => {
+      field.value = "";
+    });
+    setResolutionValue("");
+    lastManualScanDuration = "";
+    setScanDurationAuto(false, { preserveManual: true, skipPersist: true });
+    savedScanSettings = {};
+  }
+
+  function setFieldValue(field, value) {
+    if (field.dataset.field === "RESOLUTION") {
+      setResolutionValue(value);
+      return;
+    }
+
+    if (field.dataset.field === "SCANDURATION") {
+      const text = String(value ?? "").trim();
+      field.value = text.toUpperCase() === "AUTO" ? "" : text;
+      if (text && text.toUpperCase() !== "AUTO") {
+        lastManualScanDuration = text;
+      }
+      return;
+    }
+
+    if (field.dataset.field === "PATH ID") {
+      const normalized = String(value).trim().toUpperCase();
+      field.value = PATH_ID_OPTIONS.has(normalized) ? normalized : "";
+      return;
+    }
+
+    field.value = value ?? "";
+  }
+
+  function updatePathImage() {
+    const pathIdField = document.querySelector('[data-field="PATH ID"]');
+    if (!pathImage || !pathIdField) {
+      return;
+    }
+
+    const pathId = pathIdField.value.trim().toUpperCase();
+    if (PATH_ID_OPTIONS.has(pathId)) {
+      pathImage.src = `/path-images/${pathId}`;
+      pathImage.alt = `Pfad ${pathId}`;
+      pathImage.hidden = false;
+      if (pathImagePlaceholder) {
+        pathImagePlaceholder.hidden = true;
+      }
+      return;
+    }
+
+    pathImage.hidden = true;
+    pathImage.removeAttribute("src");
+    pathImage.alt = "";
+    if (pathImagePlaceholder) {
+      pathImagePlaceholder.hidden = false;
+    }
+  }
+
+  async function loadScanningFields(id, options = {}) {
+    const preserveStatus = Boolean(options.preserveStatus);
+
+    if (!id || id.length !== 3) {
+      clearScanningFields();
+      updatePathImage();
+      syncScanningActionButtons(false);
+      if (!preserveStatus) {
+        setStatus("", "");
+      }
+      return;
+    }
+
+    isLoadingFields = true;
+    if (!preserveStatus) {
+      setStatus("Lädt...", "loading");
+    }
+
+    try {
+      const response = await fetch(`/api/scanning/${encodeURIComponent(id)}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        clearScanningFields();
+        updatePathImage();
+        syncScanningActionButtons(false);
+        setStatus(data.error || "Fehler beim Laden.", "error");
+        return;
+      }
+
+      fieldInputs.forEach((field) => {
+        setFieldValue(field, data.fields[field.dataset.field] ?? "");
+      });
+      updatePathImage();
+      const measuredScanDuration = String(data.fields?.SCANDURATION ?? "").trim();
+      if (data.is_scanned && measuredScanDuration) {
+        setScanDurationAuto(false, { preserveManual: true, skipPersist: true });
+        setFieldValue(getFieldByName("SCANDURATION"), measuredScanDuration);
+        persistScanDurationAuto(id);
+      } else {
+        restoreScanDurationAuto(id);
+      }
+      captureSavedScanSettings();
+      refreshActiveLiveSettingsQuery();
+      if (!data.is_scanned) {
+        clearScanMetadataFields();
+      }
+      syncScanningActionButtons(data.is_scanned);
+      if (!preserveStatus) {
+        setStatus("", "");
+      }
+    } catch {
+      clearScanningFields();
+      updatePathImage();
+      syncScanningActionButtons(false);
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isLoadingFields = false;
+      syncScanningActionButtons();
+    }
+  }
+
+  async function saveScanningFields() {
+    const id = idInput?.value ?? "";
+    if (isLoadingFields || isSavingFields || id.length !== 3) {
+      return false;
+    }
+
+    isSavingFields = true;
+    syncScanningActionButtons();
+    setStatus("Speichert...", "loading");
+
+    try {
+      const response = await fetch(`/api/scanning/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: getEditableFieldValues() }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setStatus(data.error || "Fehler beim Speichern.", "error");
+        return false;
+      }
+
+      captureSavedScanSettings();
+      refreshActiveLiveSettingsQuery();
+      if (!data.is_scanned) {
+        clearScanMetadataFields();
+      }
+      syncScanningActionButtons(Boolean(data.is_scanned));
+      setStatus("In Excel gespeichert.", "success");
+      return true;
+    } catch {
+      setStatus("Verbindungsfehler.", "error");
+      return false;
+    } finally {
+      isSavingFields = false;
+      syncScanningActionButtons();
+    }
+  }
+
+  async function pollScanStatus(id) {
+    const pollIntervalMs = 400;
+    while (true) {
+      const response = await fetch(`/api/scanning/${encodeURIComponent(id)}/scan-status`);
+      const data = await response.json();
+
+      if (data.running) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, pollIntervalMs);
+        });
+        continue;
+      }
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      return data;
+    }
+  }
+
+  async function startScanning() {
+    const id = idInput?.value ?? "";
+    if (isStartingScan || isLoadingFields || id.length !== 3 || scanningActionButton?.disabled) {
+      return;
+    }
+
+    isStartingScan = true;
+    setStatus("Scan läuft...", "loading");
+    syncScanningActionButtons();
+
+    if (!livePreviewActive) {
+      await startLivePreview(id);
+    }
+
+    try {
+      const response = await fetch(`/api/scanning/start/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scan_settings: buildScanSettingsPayload() }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        syncScanningActionButtons(Boolean(data.is_scanned));
+        setStatus(data.error || "Scan fehlgeschlagen.", "error");
+        return;
+      }
+
+      const result = await pollScanStatus(id);
+
+      syncScanningActionButtons(true);
+      const modeHint = result.demo_mode ? " (Demo)" : "";
+      setStatus(`Scan gespeichert: ${result.json_file}${modeHint}`, "success");
+      sessionStorage.setItem("versuchs-data-changed", String(Date.now()));
+      await refreshScanningState(id, 0);
+    } catch (error) {
+      syncScanningActionButtons();
+      setStatus(error?.message || "Verbindungsfehler.", "error");
+    } finally {
+      isStartingScan = false;
+      syncScanningActionButtons();
+    }
+  }
+
+  async function resetScanning() {
+    const id = idInput?.value ?? "";
+    if (
+      isResettingScan
+      || isStartingScan
+      || isLoadingFields
+      || id.length !== 3
+      || scanningResetButton?.disabled
+    ) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert und die JSON-Datei aus data/scanning gelöscht.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    isResettingScan = true;
+    setStatus("Setzt Scan zurück...", "loading");
+    syncScanningActionButtons(true);
+
+    try {
+      const response = await fetch(`/api/scanning/reset/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        syncScanningActionButtons(true);
+        setStatus(data.error || "Zurücksetzen fehlgeschlagen.", "error");
+        return;
+      }
+
+      const deletedHint = data.deleted_file ? ` (${data.deleted_file} gelöscht)` : "";
+      setStatus(`Scan zurückgesetzt${deletedHint}.`, "success");
+      sessionStorage.setItem("versuchs-data-changed", String(Date.now()));
+      currentIsScanned = Boolean(data.is_scanned);
+      clearScanningVisuals();
+      await refreshScanningState(id, 0);
+    } catch {
+      syncScanningActionButtons();
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isResettingScan = false;
+      syncScanningActionButtons();
+    }
+  }
+
+  function handleIdChange() {
+    const id = idInput?.value ?? "";
+    loadScanningFields(id).then(() => syncScanningVisuals(id, 0, false));
+  }
+
+  if (idInput) {
+    idInput.addEventListener("id-change", handleIdChange);
+    handleIdChange();
+  }
+
+  if (profileSlider) {
+    profileSlider.addEventListener("input", () => {
+      if (profileValue) {
+        profileValue.textContent = `${profileSlider.value} / ${profileSlider.max}`;
+      }
+    });
+
+    profileSlider.addEventListener("change", () => {
+      const id = idInput?.value ?? "";
+      if (!id || id.length !== 3 || isLoadingGraph || !currentIsScanned) {
+        return;
+      }
+
+      loadScanningGraph(id, Number.parseInt(profileSlider.value, 10));
+    });
+  }
+
+  fieldInputs.forEach((field) => {
+    if (!field.readOnly) {
+      field.addEventListener("blur", saveScanningFields);
+    }
+
+    if (SCAN_SETTINGS_REQUIRED.includes(field.dataset.field)) {
+      field.addEventListener("input", onScanSettingsChanged);
+    }
+  });
+
+  getResolutionButtons().forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (currentIsScanned || isLoadingFields || button.disabled) {
+        return;
+      }
+
+      const current = getFieldByName("RESOLUTION")?.value ?? "";
+      const next = button.dataset.resolution ?? "";
+      const newValue = current === next ? "" : next;
+      setResolutionValue(newValue);
+      onScanSettingsChanged();
+      await saveScanningFields();
+    });
+  });
+
+  const scanDurationAutoButton = getScanDurationAutoButton();
+  if (scanDurationAutoButton) {
+    scanDurationAutoButton.addEventListener("click", async () => {
+      if (currentIsScanned || isLoadingFields || scanDurationAutoButton.disabled) {
+        return;
+      }
+
+      setScanDurationAuto(!isScanDurationAuto());
+      onScanSettingsChanged();
+    });
+  }
+
+  if (scanningActionButton) {
+    scanningActionButton.addEventListener("click", startScanning);
+  }
+
+  if (scanningResetButton) {
+    scanningResetButton.addEventListener("click", resetScanning);
+  }
+</script>
+{% endblock %}

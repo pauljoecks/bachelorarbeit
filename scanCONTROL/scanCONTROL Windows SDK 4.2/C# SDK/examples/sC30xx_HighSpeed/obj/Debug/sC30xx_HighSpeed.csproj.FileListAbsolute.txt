@@ -1,0 +1,10 @@
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\bin\Debug\sC30xx_HighSpeed.exe.config
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\bin\Debug\sC30xx_HighSpeed.exe
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\bin\Debug\sC30xx_HighSpeed.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\obj\Debug\sC30xx_HighSpeed.csprojAssemblyReference.cache
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\obj\Debug\sC30xx_HighSpeed.csproj.CoreCompileInputs.cache
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\obj\Debug\sC30xx_HighSpeed.exe
+C:\Users\11000573\Desktop\C# SDK\examples\sC30xx_HighSpeed\obj\Debug\sC30xx_HighSpeed.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\sC30xx_HighSpeed.exe.config
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\sC30xx_HighSpeed.exe
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\sC30xx_HighSpeed.pdb

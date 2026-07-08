@@ -27,6 +27,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Starting server...
+set SCAN_USE_DEMO=1
+set SCANNER_IP=192.168.0.1
+set WELD_USE_DEMO=1
+rem set WELD_DEVICE=cDAQ4Mod1
+
+echo.
+echo Server-Modus:
+echo   SCAN_USE_DEMO=%SCAN_USE_DEMO%
+echo   WELD_USE_DEMO=%WELD_USE_DEMO%
+echo.
+
 python server.py
 if errorlevel 1 pause

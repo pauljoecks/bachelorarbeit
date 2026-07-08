@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}bachelorarbeit{% endblock %}</title>
+    <link rel="stylesheet" href="/styles.css" />
+    {% if active_page == "menu" %}
+    <script>
+      if ("scrollRestoration" in history) {
+        history.scrollRestoration = "manual";
+      }
+    </script>
+    {% endif %}
+  </head>
+  <body>
+    <header class="nav">
+      <nav class="nav-bar" aria-label="Main navigation">
+        <div class="nav-links">
+          <a
+            href="/menu"
+            class="nav-link{% if active_page == 'menu' %} active{% endif %}"
+            {% if active_page == 'menu' %}aria-current="page"{% endif %}
+            >Proben</a
+          >
+          <a
+            href="/welding"
+            class="nav-link{% if active_page == 'welding' %} active{% endif %}"
+            {% if active_page == 'welding' %}aria-current="page"{% endif %}
+            >Schweißen</a
+          >
+          <a
+            href="/scanning"
+            class="nav-link{% if active_page == 'scanning' %} active{% endif %}"
+            {% if active_page == 'scanning' %}aria-current="page"{% endif %}
+            >Scannen</a
+          >
+        </div>
+        <div class="nav-id">
+          <div class="field-input-shell field-input-shell-id">
+            <input
+              type="text"
+              id="welding-id"
+              class="field-input field-input-id"
+              maxlength="3"
+              inputmode="text"
+              placeholder=" "
+              autocapitalize="characters"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="ID"
+            />
+            <span class="field-input-hint" aria-hidden="true">ID</span>
+          </div>
+        </div>
+        <div class="nav-excel">
+          <input
+            type="text"
+            id="versuchs-path"
+            class="nav-excel-input"
+            value="{{ versuchs_path }}"
+            placeholder="Pfad zur Excel-Datei"
+            spellcheck="false"
+            aria-label="Versuchsübersicht"
+          />
+          <button type="button" id="load-excel" class="nav-excel-button">
+            Laden
+          </button>
+          <span id="load-status" class="load-status {{ load_status.type }}" aria-live="polite"
+            >{{ load_status.message }}</span
+          >
+        </div>
+      </nav>
+    </header>
+    <script>
+      (function () {
+        const menuLink = document.querySelector('.nav-link[href="/menu"]');
+        const savedFilter = localStorage.getItem("menu-filter");
+        if (menuLink && savedFilter) {
+          const params = new URLSearchParams({ filter: savedFilter });
+          menuLink.href = `/menu?${params.toString()}`;
+        }
+      })();
+    </script>
+    <script>
+      (function () {
+        const idInput = document.getElementById("welding-id");
+        const ID_STORAGE_KEY = "experiment-id";
+
+        function normalizeExperimentId(value) {
+          return String(value).replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 3);
+        }
+
+        function dispatchIdChange() {
+          if (!idInput) {
+            return;
+          }
+
+          idInput.dispatchEvent(
+            new CustomEvent("id-change", {
+              detail: { id: idInput.value },
+            })
+          );
+        }
+
+        function updateIdFieldState() {
+          if (!idInput) {
+            return;
+          }
+
+          idInput
+            .closest(".field-input-shell-id")
+            ?.classList.toggle("has-value", idInput.value.length > 0);
+        }
+
+        window.setExperimentId = function (id) {
+          if (!idInput) {
+            return;
+          }
+
+          idInput.value = normalizeExperimentId(id);
+          localStorage.setItem(ID_STORAGE_KEY, idInput.value);
+          updateIdFieldState();
+          dispatchIdChange();
+        };
+
+        function syncIdField() {
+          if (!idInput) {
+            return;
+          }
+
+          const normalized = normalizeExperimentId(idInput.value);
+          if (idInput.value !== normalized) {
+            idInput.value = normalized;
+          }
+
+          localStorage.setItem(ID_STORAGE_KEY, idInput.value);
+          updateIdFieldState();
+          dispatchIdChange();
+        }
+
+        if (idInput) {
+          idInput.addEventListener("focus", () => {
+            idInput.select();
+          });
+
+          idInput.addEventListener("input", syncIdField);
+
+          idInput.addEventListener("paste", (event) => {
+            event.preventDefault();
+            const pasted = (event.clipboardData || window.clipboardData).getData("text");
+            idInput.value = normalizeExperimentId(pasted);
+            syncIdField();
+          });
+
+          const savedId = localStorage.getItem(ID_STORAGE_KEY);
+          if (savedId) {
+            window.setExperimentId(savedId);
+          } else {
+            updateIdFieldState();
+          }
+        }
+      })();
+    </script>
+    <main class="app">{% block content %}{% endblock %}</main>
+    <script>
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") {
+          return;
+        }
+
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) {
+          return;
+        }
+
+        const blurOnEnterTypes = new Set(["text", "search", "url", "email", "tel"]);
+        if (!blurOnEnterTypes.has(target.type)) {
+          return;
+        }
+
+        event.preventDefault();
+        target.blur();
+      });
+    </script>
+    <script>
+      const pathInput = document.getElementById("versuchs-path");
+      const loadBtn = document.getElementById("load-excel");
+      const statusEl = document.getElementById("load-status");
+
+      function setStatus(message, type = "idle") {
+        if (!statusEl) {
+          return;
+        }
+
+        statusEl.textContent = message;
+        statusEl.className = type ? `load-status ${type}` : "load-status";
+      }
+
+      if (pathInput && loadBtn) {
+        loadBtn.addEventListener("click", async () => {
+          const path = pathInput.value.trim();
+
+          if (!path) {
+            setStatus("Bitte einen Pfad angeben.", "error");
+            return;
+          }
+
+          setStatus("Lädt...", "loading");
+          loadBtn.disabled = true;
+
+          try {
+            const response = await fetch("/api/load-versuchsuebersicht", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path }),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+              setStatus(data.error || "Fehler beim Laden.", "error");
+              return;
+            }
+
+            setStatus(`${data.row_count} Zeilen geladen.`, "success");
+            if (window.location.pathname === "/menu") {
+              window.location.reload();
+            }
+          } catch {
+            setStatus("Verbindungsfehler.", "error");
+          } finally {
+            loadBtn.disabled = false;
+          }
+        });
+      }
+    </script>
+    {% if active_page == "menu" %}
+    <script>
+      (function () {
+        const MENU_SCROLL_KEY = "menu-scroll-y";
+        const FILTER_STORAGE_KEY = "menu-filter";
+
+        function isMenuPath() {
+          return window.location.pathname === "/menu";
+        }
+
+        function saveMenuScrollPosition() {
+          sessionStorage.setItem(MENU_SCROLL_KEY, String(window.scrollY));
+        }
+
+        function restoreMenuScrollPosition() {
+          const savedScroll = sessionStorage.getItem(MENU_SCROLL_KEY);
+          if (savedScroll === null) {
+            return;
+          }
+
+          const scrollY = Number.parseFloat(savedScroll);
+          if (!Number.isFinite(scrollY) || scrollY <= 0) {
+            return;
+          }
+
+          let attempts = 0;
+
+          function applyScroll() {
+            window.scrollTo(0, scrollY);
+            document.documentElement.scrollTop = scrollY;
+            document.body.scrollTop = scrollY;
+            attempts += 1;
+
+            if (Math.abs(window.scrollY - scrollY) > 2 && attempts < 40) {
+              requestAnimationFrame(applyScroll);
+            }
+          }
+
+          applyScroll();
+        }
+
+        function shouldRestoreAfterFilterRedirect() {
+          const params = new URLSearchParams(window.location.search);
+          const savedFilter = localStorage.getItem(FILTER_STORAGE_KEY);
+          return !( !params.has("filter") && savedFilter );
+        }
+
+        let scrollSaveTimer;
+        window.addEventListener(
+          "scroll",
+          () => {
+            clearTimeout(scrollSaveTimer);
+            scrollSaveTimer = setTimeout(saveMenuScrollPosition, 50);
+          },
+          { passive: true }
+        );
+
+        window.addEventListener("pagehide", saveMenuScrollPosition);
+
+        document.querySelectorAll(".nav-link").forEach((link) => {
+          const saveIfOnMenu = () => {
+            if (isMenuPath()) {
+              saveMenuScrollPosition();
+            }
+          };
+
+          link.addEventListener("mousedown", saveIfOnMenu);
+          link.addEventListener("click", saveIfOnMenu);
+        });
+
+        function scheduleRestore() {
+          if (!shouldRestoreAfterFilterRedirect()) {
+            return;
+          }
+
+          restoreMenuScrollPosition();
+          window.addEventListener("load", restoreMenuScrollPosition, { once: true });
+          window.addEventListener(
+            "pageshow",
+            (event) => {
+              if (event.persisted) {
+                restoreMenuScrollPosition();
+              }
+            }
+          );
+          setTimeout(restoreMenuScrollPosition, 0);
+          setTimeout(restoreMenuScrollPosition, 100);
+          setTimeout(restoreMenuScrollPosition, 300);
+        }
+
+        scheduleRestore();
+      })();
+    </script>
+    {% endif %}
+  </body>
+</html>

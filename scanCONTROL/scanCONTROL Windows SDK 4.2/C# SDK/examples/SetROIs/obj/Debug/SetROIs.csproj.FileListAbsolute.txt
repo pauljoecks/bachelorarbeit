@@ -1,0 +1,7 @@
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\SetROIs.exe.config
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\SetROIs.exe
+C:\Users\11000573\Desktop\C# SDK\examples\bin_x64\Debug\SetROIs.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\SetROIs\obj\Debug\SetROIs.csproj.CoreCompileInputs.cache
+C:\Users\11000573\Desktop\C# SDK\examples\SetROIs\obj\Debug\SetROIs.exe
+C:\Users\11000573\Desktop\C# SDK\examples\SetROIs\obj\Debug\SetROIs.pdb
+C:\Users\11000573\Desktop\C# SDK\examples\SetROIs\obj\Debug\SetROIs.csprojAssemblyReference.cache

@@ -1,0 +1,58 @@
+v1.6 - 26.06.2023
+-Note: Updated documentation
+-Note: Upgrade to LLT.dll 3.9.0.2170
+-Integration of scanCONTROL 30xx-430/600
+
+v1.5.1 - 04.04.2022
+-Note: Updated documentation
+-Note: Upgrade to LLT.dll 3.9.0.2133
+-Added Sensitivity parameter
+
+v1.5 - 21.04.2021
+- Note: Upgraded to LLT.dll 3.9.0.2108
+- Note: Updated documentation
+- Added new dll function "ConvertContainer2Values"
+- Added example: AVIWriter
+- restructered CLLTI.cs wrapper
+
+
+v1.4.1 - 25.05.2020
+- Note: Upgraded to LLT.dll 3.9.0.2077
+
+v1.4 - 21.10.2019
+- Note: Upgraded to LLT.dll 3.9.0.2012
+- Integration of scanCONTROL 25xx
+- Note: Updated documentation
+
+v1.3 - 14.06.2019
+- Note: Upgraded to LLT.dll 3.9.0.1969
+- Added example: Calibration
+- Added example: sC30xx_HighSpeed
+- Added example: ReadPPPResults
+- Added example: SetROIs
+- Added example: TriggerContainer
+- Note: Updated documentation
+- Note: General improvements and cleanup
+
+v1.2 - 08.04.2019
+- Integration of scanCONTROL 30xx
+- Integration of new parameter macros
+
+v1.1.0 - 06.12.2017
+- Design: Changed Solution and Project structure for easier maintenance
+- Improved: Added Feature constants for easier sensor control
+- API: Constants for extra parameter
+- API: Integrated ExportLLTConfigString, ImportLLTConfig & ImportLLTConfigString
+- Note: Upgraded to LLT.dll 3.7.x
+- Note: Dropped Firewire support
+- Note: Added Software trigger example (TriggerProfile)
+- Note: Adjusted examples to new structure and constants
+- Note: Updated documentation
+- Note: General improvements and cleanup
+- Note: Adjusted licensing
+
+v1.0.1 - 10.01.2017
+- Bugfix: Minor bugfixes
+
+v1.0.0 - 20.10.2016
+- Note: Initial Release

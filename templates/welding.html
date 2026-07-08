@@ -1,0 +1,923 @@
+{% extends "base.html" %}
+
+{% block title %}welding · bachelorarbeit{% endblock %}
+
+{% block content %}
+<section class="welding-form" aria-label="Welding parameters">
+  <div class="welding-params-grid">
+    {% for block in welding_param_table_columns %}
+    <div class="welding-params-table-wrap">
+      <table class="welding-params-table">
+        <tbody>
+          {% for field in block %}
+          <tr>
+            <th scope="row">{{ field }}</th>
+            <td>
+              {% if field == "RESOLUTION" %}
+              <div class="resolution-button-group resolution-button-group-disabled" role="group" aria-label="RESOLUTION">
+                <input
+                  type="hidden"
+                  class="welding-field-input resolution-value-input"
+                  data-field="RESOLUTION"
+                  value=""
+                />
+                {% for resolution in resolution_options %}
+                <button
+                  type="button"
+                  class="resolution-option-button"
+                  data-resolution="{{ resolution }}"
+                  aria-pressed="false"
+                  disabled
+                >{{ resolution }}</button>
+                {% endfor %}
+              </div>
+              {% elif field == "SCANDURATION" %}
+              <div class="scan-duration-control">
+                <input
+                  type="text"
+                  class="field-input field-input-readonly welding-field-input welding-field-input-compact scan-duration-input"
+                  data-field="SCANDURATION"
+                  readonly
+                  tabindex="-1"
+                  spellcheck="false"
+                />
+                <button
+                  type="button"
+                  class="scan-duration-auto-button"
+                  aria-pressed="false"
+                  disabled
+                >AUTO</button>
+              </div>
+              {% else %}
+              <input
+                type="text"
+                class="field-input welding-field-input welding-field-input-compact{% if field not in welding_editable_param_columns %} field-input-readonly{% endif %}"
+                data-field="{{ field }}"
+                {% if field not in welding_editable_param_columns %}readonly tabindex="-1"{% endif %}
+                spellcheck="false"
+              />
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+    <div class="welding-path-block-wrap">
+      <div class="welding-path-block">
+        <figure class="welding-path-image-wrap">
+          <div id="welding-path-placeholder" class="welding-path-placeholder">
+            <span class="welding-path-placeholder-text">Pfad-Vorschau</span>
+          </div>
+          <img id="welding-path-image" class="welding-path-image" alt="" hidden />
+        </figure>
+        <input
+          type="text"
+          id="welding-field-path-id"
+          class="field-input welding-field-input welding-path-input"
+          data-field="PATH ID"
+          placeholder="PATH ID"
+          aria-label="PATH ID"
+          maxlength="2"
+          autocapitalize="characters"
+          spellcheck="false"
+        />
+      </div>
+    </div>
+  </div>
+  <div class="welding-field welding-comment-field">
+    <label class="field-label" for="welding-field-comment">COMMENT</label>
+    <input
+      type="text"
+      id="welding-field-comment"
+      class="field-input welding-field-input welding-comment-input"
+      data-field="COMMENT"
+      spellcheck="false"
+    />
+  </div>
+  <button type="button" id="welding-action-button" class="welding-action-button" disabled>
+    START WELDING
+  </button>
+  <button type="button" id="welding-reset-button" class="welding-action-button welding-action-button-compact" disabled>
+    WELD ZURÜCKSETZEN
+  </button>
+  <p id="welding-form-status" class="welding-form-status" aria-live="polite"></p>
+</section>
+<section class="welding-graph-section" aria-label="Welding measurement graph">
+  <div class="welding-graph-header">
+    <h2 class="welding-graph-title">Messdaten</h2>
+    <div class="welding-graph-header-right">
+      <div id="welding-live-readings" class="welding-live-readings" hidden>
+        <span class="welding-live-reading welding-live-reading-current">
+          Strom <strong id="welding-live-current">—</strong> A
+        </span>
+        <span class="welding-live-reading welding-live-reading-voltage">
+          Spannung <strong id="welding-live-voltage">—</strong> V
+        </span>
+      </div>
+      <p id="welding-graph-status" class="welding-graph-status" aria-live="polite"></p>
+    </div>
+  </div>
+  <div class="welding-graph-wrap">
+    <canvas id="welding-graph-canvas"></canvas>
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<script>
+  const idInput = document.getElementById("welding-id");
+  const statusEl = document.getElementById("welding-form-status");
+  const fieldInputs = document.querySelectorAll(".welding-field-input");
+  const pathImage = document.getElementById("welding-path-image");
+  const pathImagePlaceholder = document.getElementById("welding-path-placeholder");
+  const weldingActionButton = document.getElementById("welding-action-button");
+  const weldingResetButton = document.getElementById("welding-reset-button");
+  const graphStatusEl = document.getElementById("welding-graph-status");
+  const graphCanvas = document.getElementById("welding-graph-canvas");
+  const liveReadingsEl = document.getElementById("welding-live-readings");
+  const liveCurrentEl = document.getElementById("welding-live-current");
+  const liveVoltageEl = document.getElementById("welding-live-voltage");
+  const PATH_ID_OPTIONS = new Set(["SO", "PO", "SI", "ME", "LI"]);
+  const RESOLUTION_OPTIONS = {{ resolution_options | tojson }};
+  const GRAPH_COLORS = ["#38bdf8", "#fbbf24"];
+  let weldingChart = null;
+  let isLiveWeldingChart = false;
+  let liveWeldPlotSince = 0;
+  let isLoadingFields = false;
+  let isStartingWeld = false;
+  let isResettingWeld = false;
+  let currentIsWelded = false;
+  let scanDurationAutoActive = false;
+
+  function getFieldByName(name) {
+    return document.querySelector(`[data-field="${name}"]`);
+  }
+
+  function getScanDurationAutoButton() {
+    return document.querySelector(".scan-duration-auto-button");
+  }
+
+  function getScanDurationAutoStorageKey(id) {
+    return `scanning-scan-duration-auto:${String(id).trim().toUpperCase()}`;
+  }
+
+  function getResolutionButtons() {
+    return document.querySelectorAll(".resolution-option-button");
+  }
+
+  function syncResolutionButtons(value) {
+    const normalized = String(value ?? "").trim();
+    getResolutionButtons().forEach((button) => {
+      const isActive = button.dataset.resolution === normalized;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+
+  function setResolutionValue(value) {
+    const field = getFieldByName("RESOLUTION");
+    if (field) {
+      field.value = value ?? "";
+    }
+    syncResolutionButtons(field?.value ?? "");
+  }
+
+  function syncScanDurationControl() {
+    const field = getFieldByName("SCANDURATION");
+    const autoButton = getScanDurationAutoButton();
+
+    if (autoButton) {
+      autoButton.classList.toggle("is-active", scanDurationAutoActive);
+      autoButton.setAttribute("aria-pressed", scanDurationAutoActive ? "true" : "false");
+    }
+
+    if (field && scanDurationAutoActive) {
+      field.value = "";
+    }
+  }
+
+  function restoreScanDurationAuto(id) {
+    const normalizedId = String(id).trim().toUpperCase();
+    if (normalizedId.length !== 3) {
+      scanDurationAutoActive = false;
+      syncScanDurationControl();
+      return;
+    }
+
+    const stored = sessionStorage.getItem(getScanDurationAutoStorageKey(normalizedId));
+    scanDurationAutoActive = stored === "1";
+    syncScanDurationControl();
+  }
+
+  function syncWeldingPathBlockLayout() {
+    const tableWrap = document.querySelector(".welding-params-table-wrap");
+    const pathBlock = document.querySelector(".welding-path-block");
+    const pathBlockWrap = document.querySelector(".welding-path-block-wrap");
+    const imageWrap = document.querySelector(".welding-path-image-wrap");
+    if (!tableWrap || !pathBlock || !pathBlockWrap || !imageWrap) {
+      return;
+    }
+
+    pathBlockWrap.style.width = "";
+    pathBlock.style.height = `${tableWrap.offsetHeight}px`;
+
+    const imageHeight = imageWrap.getBoundingClientRect().height;
+    if (imageHeight > 0) {
+      pathBlockWrap.style.width = `${Math.round(imageHeight)}px`;
+    }
+  }
+
+  const paramsTableWrap = document.querySelector(".welding-params-table-wrap");
+  if (paramsTableWrap && typeof ResizeObserver !== "undefined") {
+    const pathLayoutObserver = new ResizeObserver(syncWeldingPathBlockLayout);
+    pathLayoutObserver.observe(paramsTableWrap);
+  } else {
+    window.addEventListener("resize", syncWeldingPathBlockLayout);
+  }
+
+  syncWeldingPathBlockLayout();
+
+  if (pathImage) {
+    pathImage.addEventListener("load", syncWeldingPathBlockLayout);
+  }
+
+  function setStatus(message, type) {
+    if (!statusEl) {
+      return;
+    }
+
+    statusEl.textContent = message;
+    statusEl.className = type ? `welding-form-status ${type}` : "welding-form-status";
+  }
+
+  function setGraphStatus(message, type) {
+    if (!graphStatusEl) {
+      return;
+    }
+
+    graphStatusEl.textContent = message;
+    graphStatusEl.className = type ? `welding-graph-status ${type}` : "welding-graph-status";
+  }
+
+  function destroyWeldingChart() {
+    if (weldingChart) {
+      weldingChart.destroy();
+      weldingChart = null;
+    }
+    isLiveWeldingChart = false;
+  }
+
+  function formatLiveReading(value, digits = 1) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return "—";
+    }
+    return Number(value).toFixed(digits);
+  }
+
+  function setLiveReadingsVisible(visible) {
+    if (liveReadingsEl) {
+      liveReadingsEl.hidden = !visible;
+    }
+  }
+
+  function updateLiveReadings(currentA, voltageV) {
+    if (liveCurrentEl) {
+      liveCurrentEl.textContent = formatLiveReading(currentA, 1);
+    }
+    if (liveVoltageEl) {
+      liveVoltageEl.textContent = formatLiveReading(voltageV, 1);
+    }
+  }
+
+  function clearLiveReadings() {
+    updateLiveReadings(null, null);
+    setLiveReadingsVisible(false);
+  }
+
+  function buildWeldingChartScales() {
+    return {
+      x: {
+        type: "linear",
+        title: {
+          display: true,
+          text: "Zeit [s]",
+          color: "#94a3b8",
+        },
+        ticks: {
+          color: "#94a3b8",
+          maxTicksLimit: 8,
+        },
+        grid: {
+          color: "#334155",
+        },
+      },
+      "y-0": {
+        type: "linear",
+        position: "left",
+        title: {
+          display: true,
+          text: "Strom [A]",
+          color: GRAPH_COLORS[0],
+        },
+        ticks: {
+          color: GRAPH_COLORS[0],
+        },
+        grid: {
+          color: "#334155",
+          drawOnChartArea: true,
+        },
+      },
+      "y-1": {
+        type: "linear",
+        position: "right",
+        title: {
+          display: true,
+          text: "Spannung [V]",
+          color: GRAPH_COLORS[1],
+        },
+        ticks: {
+          color: GRAPH_COLORS[1],
+        },
+        grid: {
+          color: "#334155",
+          drawOnChartArea: false,
+        },
+      },
+    };
+  }
+
+  function ensureLiveWeldingChart() {
+    if (!graphCanvas || typeof Chart === "undefined") {
+      return;
+    }
+
+    if (weldingChart && isLiveWeldingChart) {
+      return;
+    }
+
+    destroyWeldingChart();
+    isLiveWeldingChart = true;
+
+    weldingChart = new Chart(graphCanvas, {
+      type: "line",
+      data: {
+        datasets: [
+          {
+            label: "Strom [A]",
+            data: [],
+            borderColor: GRAPH_COLORS[0],
+            backgroundColor: `${GRAPH_COLORS[0]}33`,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            yAxisID: "y-0",
+          },
+          {
+            label: "Spannung [V]",
+            data: [],
+            borderColor: GRAPH_COLORS[1],
+            backgroundColor: `${GRAPH_COLORS[1]}33`,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            yAxisID: "y-1",
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        animation: false,
+        interaction: {
+          mode: "index",
+          intersect: false,
+        },
+        plugins: {
+          legend: {
+            labels: {
+              color: "#f8fafc",
+            },
+          },
+          title: {
+            display: true,
+            text: "Live-Aufnahme",
+            color: "#94a3b8",
+            font: {
+              size: 13,
+            },
+          },
+        },
+        scales: buildWeldingChartScales(),
+      },
+    });
+  }
+
+  function appendLiveWeldingPlotPoints(points) {
+    if (!weldingChart || !isLiveWeldingChart || !Array.isArray(points) || points.length === 0) {
+      return;
+    }
+
+    points.forEach((point) => {
+      weldingChart.data.datasets[0].data.push({
+        x: point.t,
+        y: point.current_a,
+      });
+      weldingChart.data.datasets[1].data.push({
+        x: point.t,
+        y: point.voltage_v,
+      });
+    });
+    weldingChart.update("none");
+  }
+
+  function resetLiveWeldingDisplay() {
+    liveWeldPlotSince = 0;
+    setLiveReadingsVisible(true);
+    updateLiveReadings(null, null);
+    ensureLiveWeldingChart();
+    setGraphStatus("Live-Aufnahme...", "loading");
+  }
+
+  async function fetchLiveWeldPlot(id) {
+    const response = await fetch(
+      `/api/welding/${encodeURIComponent(id)}/live-plot?since=${liveWeldPlotSince}`
+    );
+    const data = await response.json();
+
+    if (!response.ok) {
+      return;
+    }
+
+    updateLiveReadings(data.current_a, data.voltage_v);
+
+    if (Array.isArray(data.points) && data.points.length > 0) {
+      appendLiveWeldingPlotPoints(data.points);
+      liveWeldPlotSince = data.total ?? liveWeldPlotSince;
+    }
+  }
+
+  function renderWeldingChart(data) {
+    if (!graphCanvas || typeof Chart === "undefined") {
+      return;
+    }
+
+    destroyWeldingChart();
+
+    const scales = {
+      x: {
+        type: "linear",
+        title: {
+          display: true,
+          text: "Zeit [s]",
+          color: "#94a3b8",
+        },
+        ticks: {
+          color: "#94a3b8",
+          maxTicksLimit: 8,
+        },
+        grid: {
+          color: "#334155",
+        },
+      },
+    };
+
+    const datasets = data.channels.map((channel, index) => {
+      const axisId = `y-${index}`;
+      const color = GRAPH_COLORS[index % GRAPH_COLORS.length];
+
+      scales[axisId] = {
+        type: "linear",
+        position: index === 0 ? "left" : "right",
+        title: {
+          display: true,
+          text: channel.name,
+          color,
+        },
+        ticks: {
+          color,
+        },
+        grid: {
+          color: "#334155",
+          drawOnChartArea: index === 0,
+        },
+      };
+
+      return {
+        label: channel.name,
+        data: channel.values.map((value, valueIndex) => ({
+          x: data.time_s[valueIndex],
+          y: value,
+        })),
+        borderColor: color,
+        backgroundColor: `${color}33`,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        yAxisID: axisId,
+      };
+    });
+
+    weldingChart = new Chart(graphCanvas, {
+      type: "line",
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        interaction: {
+          mode: "index",
+          intersect: false,
+        },
+        plugins: {
+          legend: {
+            labels: {
+              color: "#f8fafc",
+            },
+          },
+          title: {
+            display: true,
+            text: data.h5file,
+            color: "#94a3b8",
+            font: {
+              size: 13,
+            },
+          },
+        },
+        scales,
+      },
+    });
+  }
+
+  async function loadWeldingGraph(id) {
+    if (!id || id.length !== 3) {
+      destroyWeldingChart();
+      setGraphStatus("", "");
+      return;
+    }
+
+    setGraphStatus("Lädt Messdaten...", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/${encodeURIComponent(id)}/graph`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        destroyWeldingChart();
+        setGraphStatus(data.error || "Keine Messdaten.", "error");
+        return;
+      }
+
+      renderWeldingChart(data);
+      setGraphStatus("", "");
+    } catch {
+      destroyWeldingChart();
+      setGraphStatus("Verbindungsfehler.", "error");
+    }
+  }
+
+  const WELDING_SAVE_FIELDS = ["PATH ID", "WFS [m/min]", "WS [m/min]", "SERIES", "NUMBER", "COMMENT"];
+
+  function getFieldValues() {
+    const fields = {};
+    WELDING_SAVE_FIELDS.forEach((name) => {
+      fields[name] = getFieldByName(name)?.value.trim() ?? "";
+    });
+    return fields;
+  }
+
+  function clearWeldingFields() {
+    fieldInputs.forEach((field) => {
+      field.value = "";
+    });
+    setResolutionValue("");
+    scanDurationAutoActive = false;
+    syncScanDurationControl();
+  }
+
+  function setFieldValue(field, value) {
+    if (field.dataset.field === "RESOLUTION") {
+      setResolutionValue(value);
+      return;
+    }
+
+    if (field.dataset.field === "SCANDURATION") {
+      const text = String(value ?? "").trim();
+      field.value = text.toUpperCase() === "AUTO" ? "" : text;
+      return;
+    }
+
+    if (field.dataset.field === "PATH ID") {
+      const normalized = String(value).trim().toUpperCase();
+      field.value = PATH_ID_OPTIONS.has(normalized) ? normalized : "";
+      return;
+    }
+
+    field.value = value ?? "";
+  }
+
+  function normalizePathIdInput(field) {
+    field.value = field.value.replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 2);
+  }
+
+  function isValidPathId(value) {
+    return value === "" || PATH_ID_OPTIONS.has(value);
+  }
+
+  function syncWeldingActionButtons(isWelded = currentIsWelded) {
+    currentIsWelded = Boolean(isWelded);
+    const id = idInput?.value ?? "";
+    const hasValidId = id.length === 3;
+
+    if (weldingActionButton) {
+      weldingActionButton.disabled = (
+        !hasValidId
+        || currentIsWelded
+        || isStartingWeld
+        || isResettingWeld
+        || isLoadingFields
+      );
+    }
+
+    if (weldingResetButton) {
+      weldingResetButton.disabled = (
+        !hasValidId
+        || !currentIsWelded
+        || isStartingWeld
+        || isResettingWeld
+        || isLoadingFields
+      );
+    }
+  }
+
+  function updatePathImage() {
+    const pathIdField = document.querySelector('[data-field="PATH ID"]');
+    if (!pathImage || !pathIdField) {
+      return;
+    }
+
+    const pathId = pathIdField.value.trim().toUpperCase();
+    if (PATH_ID_OPTIONS.has(pathId)) {
+      pathImage.src = `/path-images/${pathId}`;
+      pathImage.alt = `Pfad ${pathId}`;
+      pathImage.hidden = false;
+      if (pathImagePlaceholder) {
+        pathImagePlaceholder.hidden = true;
+      }
+      return;
+    }
+
+    pathImage.hidden = true;
+    pathImage.removeAttribute("src");
+    pathImage.alt = "";
+    if (pathImagePlaceholder) {
+      pathImagePlaceholder.hidden = false;
+    }
+  }
+
+  async function loadWeldingFields(id) {
+    if (!id || id.length !== 3) {
+      clearWeldingFields();
+      updatePathImage();
+      syncWeldingActionButtons(false);
+      setStatus("", "");
+      return;
+    }
+
+    isLoadingFields = true;
+    syncWeldingActionButtons();
+    setStatus("Lädt...", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/${encodeURIComponent(id)}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        clearWeldingFields();
+        updatePathImage();
+        syncWeldingActionButtons(false);
+        setStatus(data.error || "Fehler beim Laden.", "error");
+        return;
+      }
+
+      fieldInputs.forEach((field) => {
+        setFieldValue(field, data.fields[field.dataset.field] ?? "");
+      });
+      restoreScanDurationAuto(id);
+      updatePathImage();
+      syncWeldingActionButtons(data.is_welded);
+      setStatus("", "");
+    } catch {
+      clearWeldingFields();
+      updatePathImage();
+      syncWeldingActionButtons(false);
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isLoadingFields = false;
+      syncWeldingActionButtons();
+    }
+  }
+
+  async function saveWeldingFields() {
+    const id = idInput?.value ?? "";
+    if (isLoadingFields || id.length !== 3) {
+      return;
+    }
+
+    const pathIdField = document.querySelector('[data-field="PATH ID"]');
+    if (pathIdField && !isValidPathId(pathIdField.value)) {
+      setStatus("PATH ID muss SO, PO, SI, ME oder LI sein.", "error");
+      return;
+    }
+
+    setStatus("Speichert...", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: getFieldValues() }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setStatus(data.error || "Fehler beim Speichern.", "error");
+        return;
+      }
+
+      setStatus("In Excel gespeichert.", "success");
+    } catch {
+      setStatus("Verbindungsfehler.", "error");
+    }
+  }
+
+  async function pollWeldStatus(id) {
+    const pollIntervalMs = 400;
+    while (true) {
+      const [statusResponse] = await Promise.all([
+        fetch(`/api/welding/${encodeURIComponent(id)}/weld-status`),
+        fetchLiveWeldPlot(id),
+      ]);
+      const data = await statusResponse.json();
+
+      if (data.running) {
+        const modeHint = data.demo_mode ? " (Demo)" : "";
+        const detail = data.message ? ` – ${data.message}` : "";
+        setStatus(`Schweißen läuft${modeHint}${detail}`, "loading");
+        setGraphStatus("Live-Aufnahme", "");
+        if (data.current_a !== undefined || data.voltage_v !== undefined) {
+          updateLiveReadings(data.current_a, data.voltage_v);
+        }
+        await new Promise((resolve) => {
+          setTimeout(resolve, pollIntervalMs);
+        });
+        continue;
+      }
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.success || data.h5_file) {
+        return data;
+      }
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, pollIntervalMs);
+      });
+    }
+  }
+
+  async function startWelding() {
+    const id = idInput?.value ?? "";
+    if (
+      isStartingWeld
+      || isLoadingFields
+      || id.length !== 3
+      || weldingActionButton?.disabled
+    ) {
+      return;
+    }
+
+    isStartingWeld = true;
+    setStatus("Schweißen wird gestartet...", "loading");
+    resetLiveWeldingDisplay();
+    syncWeldingActionButtons();
+
+    try {
+      const response = await fetch(`/api/welding/start/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        clearLiveReadings();
+        syncWeldingActionButtons(Boolean(data.is_welded));
+        setStatus(data.error || "Schweißen fehlgeschlagen.", "error");
+        return;
+      }
+
+      const result = await pollWeldStatus(id);
+
+      syncWeldingActionButtons(true);
+      const modeHint = result.demo_mode ? " (Demo)" : "";
+      setStatus(`Schweißen gespeichert: ${result.h5_file}${modeHint}`, "success");
+      sessionStorage.setItem("versuchs-data-changed", String(Date.now()));
+      clearLiveReadings();
+      await refreshWeldingState(id);
+    } catch (error) {
+      clearLiveReadings();
+      syncWeldingActionButtons();
+      setStatus(error?.message || "Verbindungsfehler.", "error");
+    } finally {
+      isStartingWeld = false;
+      syncWeldingActionButtons();
+    }
+  }
+
+  async function refreshWeldingState(id) {
+    await loadWeldingFields(id);
+    await loadWeldingGraph(id);
+  }
+
+  async function resetWelding() {
+    const id = idInput?.value ?? "";
+    if (
+      isResettingWeld
+      || isLoadingFields
+      || id.length !== 3
+      || weldingResetButton?.disabled
+    ) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Schweißen für ID ${id} wirklich zurücksetzen?\n\nWELDED und H5FILE werden in Excel geleert und die H5-Datei aus data/welding gelöscht.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    isResettingWeld = true;
+    setStatus("Setzt Schweißen zurück...", "loading");
+    syncWeldingActionButtons(true);
+
+    try {
+      const response = await fetch(`/api/welding/reset/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        syncWeldingActionButtons(true);
+        setStatus(data.error || "Zurücksetzen fehlgeschlagen.", "error");
+        return;
+      }
+
+      const deletedHint = data.deleted_file ? ` (${data.deleted_file} gelöscht)` : "";
+      setStatus(`Schweißen zurückgesetzt${deletedHint}.`, "success");
+      sessionStorage.setItem("versuchs-data-changed", String(Date.now()));
+      currentIsWelded = Boolean(data.is_welded);
+      clearLiveReadings();
+      destroyWeldingChart();
+      setGraphStatus("", "");
+      await refreshWeldingState(id);
+    } catch {
+      syncWeldingActionButtons();
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isResettingWeld = false;
+      syncWeldingActionButtons();
+    }
+  }
+
+  function handleIdChange() {
+    const id = idInput?.value ?? "";
+    loadWeldingFields(id);
+    loadWeldingGraph(id);
+  }
+
+  if (idInput) {
+    idInput.addEventListener("id-change", handleIdChange);
+    handleIdChange();
+  }
+
+  if (weldingActionButton) {
+    weldingActionButton.addEventListener("click", startWelding);
+  }
+
+  if (weldingResetButton) {
+    weldingResetButton.addEventListener("click", resetWelding);
+  }
+
+  fieldInputs.forEach((field) => {
+    if (field.dataset.field === "PATH ID") {
+      field.addEventListener("input", () => {
+        normalizePathIdInput(field);
+        updatePathImage();
+      });
+    }
+
+    if (!field.readOnly) {
+      field.addEventListener("blur", saveWeldingFields);
+    }
+  });
+</script>
+{% endblock %}

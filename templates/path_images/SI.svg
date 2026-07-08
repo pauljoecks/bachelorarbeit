@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="400.0" height="400.0" viewBox="0 0 80.0 80.0">
+  <rect width="80.0" height="80.0" fill="white"/>
+  <rect x="0.25" y="0.25" width="79.5" height="79.5" fill="none" stroke="#1a1a1a" stroke-width="0.4"/>
+  <rect x="15.0" y="15.0" width="50.0" height="50.0" fill="none" stroke="#bbb" stroke-width="0.2" stroke-dasharray="1.5,1.5"/>
+  <path d="M 39.00,41.00 L 41.00,41.00 L 41.00,39.00 L 35.00,39.00 L 35.00,45.00 L 45.00,45.00 L 45.00,35.00 L 31.00,35.00 L 31.00,49.00 L 49.00,49.00 L 49.00,31.00 L 27.00,31.00 L 27.00,53.00 L 53.00,53.00 L 53.00,27.00 L 23.00,27.00 L 23.00,57.00 L 57.00,57.00 L 57.00,23.00 L 19.00,23.00 L 19.00,61.00 L 61.00,61.00 L 61.00,19.00 L 15.00,19.00 L 15.00,65.00 L 65.00,65.00 L 65.00,15.00 L 15.00,15.00" fill="none" stroke="#2563eb" stroke-width="0.35" stroke-linejoin="round"/>
+  <circle cx="39.0" cy="41.0" r="0.9" fill="#16a34a"/>
+  <text x="40.2" y="40.0" font-size="2.2" font-family="sans-serif" font-weight="bold" fill="#16a34a">START</text>
+  <circle cx="15.0" cy="15.0" r="0.9" fill="#ea580c"/>
+  <text x="16.2" y="17.2" font-size="2.2" font-family="sans-serif" font-weight="bold" fill="#ea580c">END</text>
+  <circle cx="39.0" cy="41.0" r="0.55" fill="#dc2626"/>
+  <text x="40.0" y="40.2" font-size="2" font-family="monospace" fill="#555">1</text>
+  <circle cx="41.0" cy="41.0" r="0.55" fill="#dc2626"/>
+  <text x="42.0" y="40.2" font-size="2" font-family="monospace" fill="#555">2</text>
+  <circle cx="41.0" cy="39.0" r="0.55" fill="#dc2626"/>
+  <text x="42.0" y="38.2" font-size="2" font-family="monospace" fill="#555">3</text>
+  <circle cx="35.0" cy="39.0" r="0.55" fill="#dc2626"/>
+  <text x="36.0" y="38.2" font-size="2" font-family="monospace" fill="#555">4</text>
+  <circle cx="35.0" cy="45.0" r="0.55" fill="#dc2626"/>
+  <text x="36.0" y="44.2" font-size="2" font-family="monospace" fill="#555">5</text>
+  <circle cx="45.0" cy="45.0" r="0.55" fill="#dc2626"/>
+  <text x="46.0" y="44.2" font-size="2" font-family="monospace" fill="#555">6</text>
+  <circle cx="45.0" cy="35.0" r="0.55" fill="#dc2626"/>
+  <text x="46.0" y="34.2" font-size="2" font-family="monospace" fill="#555">7</text>
+  <circle cx="31.0" cy="35.0" r="0.55" fill="#dc2626"/>
+  <text x="32.0" y="34.2" font-size="2" font-family="monospace" fill="#555">8</text>
+  <circle cx="31.0" cy="49.0" r="0.55" fill="#dc2626"/>
+  <text x="32.0" y="48.2" font-size="2" font-family="monospace" fill="#555">9</text>
+  <circle cx="49.0" cy="49.0" r="0.55" fill="#dc2626"/>
+  <text x="50.0" y="48.2" font-size="2" font-family="monospace" fill="#555">10</text>
+  <circle cx="49.0" cy="31.0" r="0.55" fill="#dc2626"/>
+  <text x="50.0" y="30.2" font-size="2" font-family="monospace" fill="#555">11</text>
+  <circle cx="27.0" cy="31.0" r="0.55" fill="#dc2626"/>
+  <text x="28.0" y="30.2" font-size="2" font-family="monospace" fill="#555">12</text>
+  <circle cx="27.0" cy="53.0" r="0.55" fill="#dc2626"/>
+  <text x="28.0" y="52.2" font-size="2" font-family="monospace" fill="#555">13</text>
+  <circle cx="53.0" cy="53.0" r="0.55" fill="#dc2626"/>
+  <text x="54.0" y="52.2" font-size="2" font-family="monospace" fill="#555">14</text>
+  <circle cx="53.0" cy="27.0" r="0.55" fill="#dc2626"/>
+  <text x="54.0" y="26.2" font-size="2" font-family="monospace" fill="#555">15</text>
+  <circle cx="23.0" cy="27.0" r="0.55" fill="#dc2626"/>
+  <text x="24.0" y="26.2" font-size="2" font-family="monospace" fill="#555">16</text>
+  <circle cx="23.0" cy="57.0" r="0.55" fill="#dc2626"/>
+  <text x="24.0" y="56.2" font-size="2" font-family="monospace" fill="#555">17</text>
+  <circle cx="57.0" cy="57.0" r="0.55" fill="#dc2626"/>
+  <text x="58.0" y="56.2" font-size="2" font-family="monospace" fill="#555">18</text>
+  <circle cx="57.0" cy="23.0" r="0.55" fill="#dc2626"/>
+  <text x="58.0" y="22.2" font-size="2" font-family="monospace" fill="#555">19</text>
+  <circle cx="19.0" cy="23.0" r="0.55" fill="#dc2626"/>
+  <text x="20.0" y="22.2" font-size="2" font-family="monospace" fill="#555">20</text>
+  <circle cx="19.0" cy="61.0" r="0.55" fill="#dc2626"/>
+  <text x="20.0" y="60.2" font-size="2" font-family="monospace" fill="#555">21</text>
+  <circle cx="61.0" cy="61.0" r="0.55" fill="#dc2626"/>
+  <text x="62.0" y="60.2" font-size="2" font-family="monospace" fill="#555">22</text>
+  <circle cx="61.0" cy="19.0" r="0.55" fill="#dc2626"/>
+  <text x="62.0" y="18.2" font-size="2" font-family="monospace" fill="#555">23</text>
+  <circle cx="15.0" cy="19.0" r="0.55" fill="#dc2626"/>
+  <text x="16.0" y="18.2" font-size="2" font-family="monospace" fill="#555">24</text>
+  <circle cx="15.0" cy="65.0" r="0.55" fill="#dc2626"/>
+  <text x="16.0" y="64.2" font-size="2" font-family="monospace" fill="#555">25</text>
+  <circle cx="65.0" cy="65.0" r="0.55" fill="#dc2626"/>
+  <text x="66.0" y="64.2" font-size="2" font-family="monospace" fill="#555">26</text>
+  <circle cx="65.0" cy="15.0" r="0.55" fill="#dc2626"/>
+  <text x="66.0" y="14.2" font-size="2" font-family="monospace" fill="#555">27</text>
+  <circle cx="15.0" cy="15.0" r="0.55" fill="#dc2626"/>
+  <text x="16.0" y="14.2" font-size="2" font-family="monospace" fill="#555">28</text>
+  <text x="40.0" y="5" text-anchor="middle" font-size="3.2" font-family="sans-serif" fill="#333">80 x 80 mm — Inside-Out Spiral</text>
+  <text x="40.0" y="78.0" text-anchor="middle" font-size="2.8" font-family="sans-serif" fill="#555">50 x 50 mm | 4 mm spacing | 28 corners</text>
+</svg>
