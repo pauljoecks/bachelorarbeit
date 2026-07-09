@@ -149,6 +149,35 @@
   let currentIsWelded = false;
   let scanDurationAutoActive = false;
 
+  function formatTooltipNumber(value) {
+    if (value == null || Number.isNaN(Number(value))) {
+      return "";
+    }
+
+    return Number(value).toLocaleString("de-DE", { maximumFractionDigits: 3 });
+  }
+
+  function buildPrimaryYTooltipCallbacks(xLabel) {
+    return {
+      title() {
+        return "";
+      },
+      label(context) {
+        const name = context.dataset.label || "";
+        const yValue = formatTooltipNumber(context.parsed.y);
+        return yValue ? `${name}: ${yValue}` : name;
+      },
+      afterBody(tooltipItems) {
+        if (!tooltipItems.length) {
+          return [];
+        }
+
+        const xValue = formatTooltipNumber(tooltipItems[0].parsed.x);
+        return xValue ? [`${xLabel}: ${xValue}`] : [];
+      },
+    };
+  }
+
   function getFieldByName(name) {
     return document.querySelector(`[data-field="${name}"]`);
   }
@@ -369,6 +398,7 @@
             backgroundColor: `${GRAPH_COLORS[0]}33`,
             borderWidth: 1.5,
             pointRadius: 0,
+            pointHitRadius: 12,
             yAxisID: "y-0",
           },
           {
@@ -378,6 +408,7 @@
             backgroundColor: `${GRAPH_COLORS[1]}33`,
             borderWidth: 1.5,
             pointRadius: 0,
+            pointHitRadius: 12,
             yAxisID: "y-1",
           },
         ],
@@ -388,7 +419,8 @@
         parsing: false,
         animation: false,
         interaction: {
-          mode: "index",
+          mode: "nearest",
+          axis: "x",
           intersect: false,
         },
         plugins: {
@@ -404,6 +436,9 @@
             font: {
               size: 13,
             },
+          },
+          tooltip: {
+            callbacks: buildPrimaryYTooltipCallbacks("Zeit [s]"),
           },
         },
         scales: buildWeldingChartScales(),
@@ -503,14 +538,17 @@
 
       return {
         label: channel.name,
-        data: channel.values.map((value, valueIndex) => ({
-          x: data.time_s[valueIndex],
-          y: value,
-        })),
+        data: channel.values
+          .map((value, valueIndex) => ({
+            x: Number.parseFloat(data.time_s[valueIndex]),
+            y: Number.parseFloat(value),
+          }))
+          .sort((left, right) => left.x - right.x),
         borderColor: color,
         backgroundColor: `${color}33`,
         borderWidth: 1.5,
         pointRadius: 0,
+        pointHitRadius: 12,
         yAxisID: axisId,
       };
     });
@@ -523,7 +561,8 @@
         maintainAspectRatio: false,
         parsing: false,
         interaction: {
-          mode: "index",
+          mode: "nearest",
+          axis: "x",
           intersect: false,
         },
         plugins: {
@@ -539,6 +578,9 @@
             font: {
               size: 13,
             },
+          },
+          tooltip: {
+            callbacks: buildPrimaryYTooltipCallbacks("Zeit [s]"),
           },
         },
         scales,

@@ -169,6 +169,56 @@ class ScanSettings:
         return document
 
 
+def extract_scan_duration_s(scan_settings: dict | None) -> float:
+    if not scan_settings:
+        raise ValueError("SCANDURATION fehlt.")
+
+    scan_window = scan_settings.get("scan_window") or {}
+    duration_s = scan_window.get("effective_duration_s", scan_settings.get("scan_duration_s"))
+    if duration_s is None or str(duration_s).strip() == "":
+        raise ValueError("SCANDURATION fehlt.")
+
+    return float(duration_s)
+
+
+def assign_profile_y_mm(
+    profiles: list[dict],
+    *,
+    scan_speed_mm_s: float,
+    scan_duration_s: float,
+) -> None:
+    profile_count = len(profiles)
+    if profile_count == 0:
+        return
+
+    if scan_speed_mm_s <= 0 or scan_duration_s <= 0:
+        raise ValueError("SCANSPEED und SCANDURATION müssen größer als 0 sein.")
+
+    total_y_mm = float(scan_speed_mm_s) * float(scan_duration_s)
+    if profile_count == 1:
+        profiles[0]["y_mm"] = 0.0
+        return
+
+    step_mm = total_y_mm / (profile_count - 1)
+    for index, profile in enumerate(profiles):
+        profile["y_mm"] = round(index * step_mm, 6)
+
+
+def enrich_scan_payload_with_geometry(scan_payload: dict, scan_speed_mm_s: float | None) -> None:
+    if scan_speed_mm_s is None:
+        return
+
+    scan_settings = dict(scan_payload.get("scan_settings") or {})
+    scan_duration_s = extract_scan_duration_s(scan_settings)
+    assign_profile_y_mm(
+        scan_payload["profiles"],
+        scan_speed_mm_s=float(scan_speed_mm_s),
+        scan_duration_s=scan_duration_s,
+    )
+    scan_settings["scan_speed_mm_s"] = float(scan_speed_mm_s)
+    scan_payload["scan_settings"] = scan_settings
+
+
 class ScanError(Exception):
     pass
 
@@ -1184,6 +1234,7 @@ def run_scan(
     demo: bool = False,
     scanner_ip: str | None = None,
     settings: ScanSettings | None = None,
+    scan_speed_mm_s: float | None = None,
 ) -> dict:
     experiment_id = experiment_id.strip().upper()
     timestamp = datetime.now()
@@ -1199,6 +1250,7 @@ def run_scan(
             else:
                 scan_payload = _capture_profiles(scanner_ip=scanner_ip, settings=settings)
 
+        enrich_scan_payload_with_geometry(scan_payload, scan_speed_mm_s)
         return _save_scan_results(experiment_id, scan_payload, output_dir, timestamp)
     finally:
         end_scan_progress()

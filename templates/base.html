@@ -35,6 +35,12 @@
             {% if active_page == 'scanning' %}aria-current="page"{% endif %}
             >Scannen</a
           >
+          <a
+            href="/analyzing"
+            class="nav-link{% if active_page == 'analyzing' %} active{% endif %}"
+            {% if active_page == 'analyzing' %}aria-current="page"{% endif %}
+            >Analyse</a
+          >
         </div>
         <div class="nav-id">
           <div class="field-input-shell field-input-shell-id">
@@ -223,7 +229,7 @@
             }
 
             setStatus(`${data.row_count} Zeilen geladen.`, "success");
-            if (window.location.pathname === "/menu") {
+            if (window.location.pathname === "/menu" || window.location.pathname === "/analyzing") {
               window.location.reload();
             }
           } catch {

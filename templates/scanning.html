@@ -138,10 +138,14 @@
   const PATH_ID_OPTIONS = new Set(["SO", "PO", "SI", "ME", "LI"]);
   const SCAN_SETTINGS_REQUIRED = {{ scan_settings_required_columns | tojson }};
   const SCANNING_EDITABLE_FIELDS = {{ scanning_editable_columns | tojson }};
+  const SCANSPEED_FIELD = {{ scanspeed_field | tojson }};
+  const SCANNING_EDITABLE_AFTER_SCAN = {{ scanning_editable_after_scan_columns | tojson }};
+  const SCAN_DEFAULT_EXPOSURE_US = {{ scan_default_exposure_us | tojson }};
   const RESOLUTION_OPTIONS = {{ resolution_options | tojson }};
   const SCAN_DURATION_AUTO_SECONDS = {{ scan_duration_auto_seconds | tojson }};
   let scanningChart = null;
   let isLoadingGraph = false;
+  let profileYValues = [];
   let livePreviewActive = false;
   let livePreviewRequest = null;
   let livePreviewFetching = false;
@@ -150,13 +154,43 @@
   const LIVE_PREVIEW_DELAY_MS = 250;
   const LIVE_SETTINGS_DEBOUNCE_MS = 600;
   let isLoadingFields = false;
+
+  function formatTooltipNumber(value) {
+    if (value == null || Number.isNaN(Number(value))) {
+      return "";
+    }
+
+    return Number(value).toLocaleString("de-DE", { maximumFractionDigits: 3 });
+  }
+
+  function buildPrimaryYTooltipCallbacks(xLabel) {
+    return {
+      title() {
+        return "";
+      },
+      label(context) {
+        const name = context.dataset.label || "";
+        const yValue = formatTooltipNumber(context.parsed.y);
+        return yValue ? `${name}: ${yValue}` : name;
+      },
+      afterBody(tooltipItems) {
+        if (!tooltipItems.length) {
+          return [];
+        }
+
+        const xValue = formatTooltipNumber(tooltipItems[0].parsed.x);
+        return xValue ? [`${xLabel}: ${xValue}`] : [];
+      },
+    };
+  }
+
   let isStartingScan = false;
   let isResettingScan = false;
   let currentIsScanned = false;
   let isSavingFields = false;
   let savedScanSettings = {};
   let lastManualScanDuration = "";
-  let scanDurationAutoActive = false;
+  let scanDurationAutoActive = true;
 
   function getScanDurationAutoButton() {
     return document.querySelector(".scan-duration-auto-button");
@@ -190,7 +224,8 @@
     }
 
     const stored = sessionStorage.getItem(getScanDurationAutoStorageKey(normalizedId));
-    setScanDurationAuto(stored === "1", { preserveManual: true, skipPersist: true });
+    const active = stored === null ? true : stored === "1";
+    setScanDurationAuto(active, { preserveManual: true, skipPersist: true });
   }
 
   function syncScanDurationControl(isScanned = currentIsScanned) {
@@ -288,10 +323,14 @@
     return {
       resolution: Number.parseInt(values.RESOLUTION, 10),
       profile_frequency: Number.parseFloat(String(values.PROFILEFREQUENCY).replace(",", ".")),
-      exposure_us: Number.parseInt(values.EXPOSURE, 10),
       scan_duration_auto: isScanDurationAuto(),
       scan_duration_s: getEffectiveScanDurationS(),
     };
+  }
+
+  function isValidScanSpeedValue(value) {
+    const parsed = Number.parseFloat(String(value).replace(",", "."));
+    return Number.isFinite(parsed) && parsed > 0;
   }
 
   function areScanSettingsComplete() {
@@ -299,7 +338,17 @@
       if (name === "SCANDURATION" && isScanDurationAuto()) {
         return true;
       }
-      return getScanSettingsValues()[name] !== "";
+
+      const value = getScanSettingsValues()[name];
+      if (value === "") {
+        return false;
+      }
+
+      if (name === SCANSPEED_FIELD) {
+        return isValidScanSpeedValue(value);
+      }
+
+      return true;
     });
   }
 
@@ -338,14 +387,14 @@
       return;
     }
 
-    if (!isScanSettingsSaved() || isSavingFields) {
-      setStatus("Scan-Einstellungen ungespeichert – Feld verlassen zum Speichern.", "loading");
+    if (isSavingFields) {
+      setStatus("Speichert...", "loading");
       return;
     }
 
     if (
       statusEl?.textContent === "Scan-Einstellungen unvollständig."
-      || statusEl?.textContent === "Scan-Einstellungen ungespeichert – Feld verlassen zum Speichern."
+      || statusEl?.textContent === "Speichert..."
     ) {
       setStatus("", "");
     }
@@ -436,7 +485,6 @@
     const hasValidId = id.length === 3;
     const scanSettingsReady = (
       areScanSettingsComplete()
-      && isScanSettingsSaved()
       && !isSavingFields
       && !isLoadingFields
     );
@@ -494,17 +542,46 @@
     }
   }
 
-  function updateProfileSlider(profileIndex, profileCount) {
+  function formatProfileSliderLabel(profileIndex, maxIndex, activeYMm = null) {
+    const indexText = `${profileIndex} / ${maxIndex}`;
+    const yValue = activeYMm ?? profileYValues?.[profileIndex];
+    if (yValue == null || Number.isNaN(Number(yValue))) {
+      return indexText;
+    }
+
+    const yText = Number(yValue).toLocaleString("de-DE", { maximumFractionDigits: 1 });
+    return `${indexText} · y ${yText} mm`;
+  }
+
+  function updateProfileSlider(profileIndex, profileCount, activeYMm = null) {
     if (!profileSlider || !profileValue) {
       return;
     }
 
     const maxIndex = Math.max(profileCount - 1, 0);
+    const activeIndex = Math.min(profileIndex, maxIndex);
     profileSlider.min = "0";
     profileSlider.max = String(maxIndex);
-    profileSlider.value = String(Math.min(profileIndex, maxIndex));
+    profileSlider.value = String(activeIndex);
     profileSlider.disabled = profileCount <= 1;
-    profileValue.textContent = `${profileSlider.value} / ${maxIndex}`;
+    profileValue.textContent = formatProfileSliderLabel(activeIndex, maxIndex, activeYMm);
+  }
+
+  async function loadProfileYValues(id) {
+    profileYValues = [];
+    if (!id || id.length !== 3) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/scanning/${encodeURIComponent(id)}/profile-y`);
+      const data = await response.json();
+      if (response.ok && Array.isArray(data.y_mm)) {
+        profileYValues = data.y_mm;
+      }
+    } catch {
+      profileYValues = [];
+    }
   }
 
   function renderScanningChart(data) {
@@ -526,14 +603,17 @@
         datasets: [
           {
             label: "Höhe z [mm]",
-            data: data.x_mm.map((xValue, index) => ({
-              x: xValue,
-              y: data.z_mm[index],
-            })),
+            data: data.x_mm
+              .map((xValue, index) => ({
+                x: Number.parseFloat(xValue),
+                y: Number.parseFloat(data.z_mm[index]),
+              }))
+              .sort((left, right) => left.x - right.x),
             borderColor: data.live ? "#34d399" : "#38bdf8",
             backgroundColor: data.live ? "#34d39933" : "#38bdf833",
             borderWidth: 1.5,
             pointRadius: 0,
+            pointHitRadius: 12,
           },
         ],
       },
@@ -543,7 +623,8 @@
         parsing: false,
         animation: false,
         interaction: {
-          mode: "index",
+          mode: "nearest",
+          axis: "x",
           intersect: false,
         },
         plugins: {
@@ -559,6 +640,9 @@
             font: {
               size: 13,
             },
+          },
+          tooltip: {
+            callbacks: buildPrimaryYTooltipCallbacks("x [mm]"),
           },
         },
         scales: {
@@ -644,7 +728,7 @@
 
     const resolution = Number.parseInt(values.RESOLUTION, 10);
     const profileFrequency = Number.parseFloat(String(values.PROFILEFREQUENCY).replace(",", "."));
-    const exposureUs = Number.parseInt(values.EXPOSURE, 10);
+    const exposureUs = SCAN_DEFAULT_EXPOSURE_US;
     const scanDurationS = getEffectiveScanDurationS();
 
     if (
@@ -669,7 +753,6 @@
     const params = new URLSearchParams({
       resolution: String(resolution),
       profile_frequency: String(profileFrequency),
-      exposure_us: String(exposureUs),
       scan_duration_s: String(scanDurationS),
     });
     return `?${params.toString()}`;
@@ -802,6 +885,7 @@
 
   function clearScanningVisuals() {
     destroyScanningChart();
+    profileYValues = [];
     updateProfileSlider(0, 0);
     if (profileSlider) {
       profileSlider.disabled = true;
@@ -833,6 +917,7 @@
 
       if (!response.ok) {
         destroyScanningChart();
+        profileYValues = [];
         updateProfileSlider(0, 0);
         if (profileSlider) {
           profileSlider.disabled = true;
@@ -841,7 +926,8 @@
         return;
       }
 
-      updateProfileSlider(data.profile_index, data.profile_count);
+      await loadProfileYValues(id);
+      updateProfileSlider(data.profile_index, data.profile_count, data.y_mm);
       renderScanningChart(data);
       setGraphStatus(
         [
@@ -881,7 +967,7 @@
   function getEditableFieldValues() {
     const fields = {};
     const editableFields = currentIsScanned
-      ? SCANNING_EDITABLE_FIELDS.filter((name) => name === "COMMENT")
+      ? SCANNING_EDITABLE_AFTER_SCAN
       : SCANNING_EDITABLE_FIELDS;
 
     editableFields.forEach((name) => {
@@ -1107,7 +1193,10 @@
       const response = await fetch(`/api/scanning/start/${encodeURIComponent(id)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scan_settings: buildScanSettingsPayload() }),
+        body: JSON.stringify({
+          scan_settings: buildScanSettingsPayload(),
+          scanspeed: getFieldByName(SCANSPEED_FIELD)?.value.trim() ?? "",
+        }),
       });
       const data = await response.json();
 
@@ -1195,8 +1284,14 @@
 
   if (profileSlider) {
     profileSlider.addEventListener("input", () => {
+      const maxIndex = Number.parseInt(profileSlider.max, 10);
+      const activeIndex = Number.parseInt(profileSlider.value, 10);
       if (profileValue) {
-        profileValue.textContent = `${profileSlider.value} / ${profileSlider.max}`;
+        profileValue.textContent = formatProfileSliderLabel(
+          activeIndex,
+          maxIndex,
+          profileYValues?.[activeIndex] ?? null,
+        );
       }
     });
 
@@ -1244,6 +1339,7 @@
 
       setScanDurationAuto(!isScanDurationAuto());
       onScanSettingsChanged();
+      await saveScanningFields();
     });
   }
 

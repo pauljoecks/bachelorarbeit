@@ -1,0 +1,1451 @@
+{% extends "base.html" %}
+
+{% block title %}analyzing · bachelorarbeit{% endblock %}
+
+{% block content %}
+<div class="analyzing-layout">
+  <aside class="analyzing-sidebar" aria-label="Probenauswahl">
+    <div class="menu-table-header">
+      <p class="menu-table-count">{{ table_rows|length }} Einträge mit WELDED und SCANNED</p>
+      <div class="analyzing-header-actions">
+        <span id="analyzing-generate-status" class="analyzing-generate-status" aria-live="polite"></span>
+        <button type="button" id="analyzing-generate-button" class="analyzing-generate-button" disabled>
+          Generate
+        </button>
+      </div>
+    </div>
+    <div class="menu-table-wrapper analyzing-table-wrapper">
+      {% if table_rows %}
+      <table class="menu-table analyzing-table" id="analyzing-table">
+        <thead>
+          <tr>
+            <th scope="col" class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  id="analyzing-select-all"
+                  class="analyzing-row-select analyzing-select-all"
+                  aria-label="Alle auswählbaren Einträge auswählen"
+                />
+              </div>
+            </th>
+            {% for column in table_columns %}
+            {% set sort_type = "text" %}
+            {% if column == "COUNT" %}
+            {% set sort_type = "number" %}
+            {% elif column in ["WELDED", "SCANNED"] %}
+            {% set sort_type = "date" %}
+            {% endif %}
+            <th scope="col">
+              <button
+                type="button"
+                class="menu-table-sort"
+                data-sort-index="{{ loop.index0 + 1 }}"
+                data-sort-type="{{ sort_type }}"
+              >
+                <span>{{ column }}</span>
+                <span class="menu-table-sort-indicator" aria-hidden="true"></span>
+              </button>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in table_rows %}
+          <tr
+            class="menu-table-row"
+            data-id="{{ row.ID }}"
+            data-has-analyze="{{ '1' if row.has_analyze else '0' }}"
+          >
+            <td class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  class="analyzing-row-select"
+                  {% if not row.has_analyze %}disabled{% endif %}
+                  aria-label="ID {{ row.ID }} auswählen"
+                />
+              </div>
+            </td>
+            {% for column in table_columns %}
+            <td>{{ row[column] }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="menu-table-empty">Keine Einträge mit WELDED und SCANNED gefunden.</p>
+      {% endif %}
+    </div>
+    </aside>
+
+  <section class="analyzing-graphs-panel" aria-label="Profilgrafiken">
+    <div class="analyzing-view-toggle" role="group" aria-label="Ansicht">
+      <button
+        type="button"
+        class="analyzing-view-button"
+        data-view="weld"
+        aria-pressed="false"
+      >
+        Weld
+      </button>
+      <button
+        type="button"
+        class="analyzing-view-button is-active"
+        data-view="scan"
+        aria-pressed="true"
+      >
+        Scan
+      </button>
+    </div>
+
+    <div class="analyzing-graph-controls-wrap">
+      <div
+        id="analyzing-profile-controls"
+        class="analyzing-graph-controls scanning-graph-controls"
+      >
+        <label class="scanning-profile-label" for="analyzing-profile-slider">Profil</label>
+        <input
+          type="range"
+          id="analyzing-profile-slider"
+          class="scanning-profile-slider"
+          min="0"
+          max="0"
+          value="0"
+          step="1"
+          disabled
+        />
+        <output id="analyzing-profile-value" class="scanning-profile-value" for="analyzing-profile-slider">0 / 0</output>
+      </div>
+    </div>
+
+    <div id="analyzing-scan-view" class="analyzing-view-panel">
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-graph-canvas"></canvas>
+      </div>
+
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-scan-graph-canvas"></canvas>
+      </div>
+
+      <div class="analyzing-heatmap-panel">
+        <canvas id="analyzing-heatmap-canvas" aria-label="Analyse-Heatmap"></canvas>
+        <div class="analyzing-heatmap-legend" aria-hidden="true">
+          <span id="analyzing-heatmap-scale-min">–</span>
+          <span class="analyzing-heatmap-legend-bar"></span>
+          <span id="analyzing-heatmap-scale-max">–</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="analyzing-weld-view" class="analyzing-view-panel" hidden>
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-weld-graph-canvas"></canvas>
+      </div>
+
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-raw-weld-graph-canvas"></canvas>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<script>
+  if (sessionStorage.getItem("versuchs-data-changed")) {
+    sessionStorage.removeItem("versuchs-data-changed");
+    window.location.reload();
+  }
+
+  function formatTooltipNumber(value) {
+    if (value == null || Number.isNaN(Number(value))) {
+      return "";
+    }
+
+    return Number(value).toLocaleString("de-DE", { maximumFractionDigits: 3 });
+  }
+
+  function buildPrimaryYTooltipCallbacks(xLabel) {
+    return {
+      title() {
+        return "";
+      },
+      label(context) {
+        const name = context.dataset.label || "";
+        const yValue = formatTooltipNumber(context.parsed.y);
+        return yValue ? `${name}: ${yValue}` : name;
+      },
+      afterBody(tooltipItems) {
+        if (!tooltipItems.length) {
+          return [];
+        }
+
+        const xValue = formatTooltipNumber(tooltipItems[0].parsed.x);
+        return xValue ? [`${xLabel}: ${xValue}`] : [];
+      },
+    };
+  }
+
+  const analyzingTable = document.getElementById("analyzing-table");
+
+  if (analyzingTable) {
+    const tbody = analyzingTable.querySelector("tbody");
+    const sortButtons = analyzingTable.querySelectorAll(".menu-table-sort");
+    let activeIndex = -1;
+    let ascending = true;
+
+    function compareValues(a, b, type) {
+      if (type === "number") {
+        const numA = Number.parseFloat(a);
+        const numB = Number.parseFloat(b);
+
+        if (Number.isNaN(numA) && Number.isNaN(numB)) {
+          return 0;
+        }
+        if (Number.isNaN(numA)) {
+          return 1;
+        }
+        if (Number.isNaN(numB)) {
+          return -1;
+        }
+
+        return numA - numB;
+      }
+
+      if (type === "date") {
+        const timeA = Date.parse(a);
+        const timeB = Date.parse(b);
+
+        if (Number.isNaN(timeA) && Number.isNaN(timeB)) {
+          return 0;
+        }
+        if (Number.isNaN(timeA)) {
+          return 1;
+        }
+        if (Number.isNaN(timeB)) {
+          return -1;
+        }
+
+        return timeA - timeB;
+      }
+
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    }
+
+    function updateIndicators() {
+      sortButtons.forEach((button) => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const indicator = button.querySelector(".menu-table-sort-indicator");
+        const isActive = index === activeIndex;
+
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-sort", isActive ? (ascending ? "ascending" : "descending") : "none");
+        indicator.textContent = isActive ? (ascending ? "▲" : "▼") : "";
+      });
+    }
+
+    function sortByColumn(index, type) {
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+
+      rows.sort((rowA, rowB) => {
+        const valueA = rowA.children[index]?.textContent.trim() ?? "";
+        const valueB = rowB.children[index]?.textContent.trim() ?? "";
+        const result = compareValues(valueA, valueB, type);
+        return ascending ? result : -result;
+      });
+
+      rows.forEach((row) => tbody.appendChild(row));
+    }
+
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const type = button.dataset.sortType;
+
+        if (activeIndex === index) {
+          ascending = !ascending;
+        } else {
+          activeIndex = index;
+          ascending = true;
+        }
+
+        sortByColumn(index, type);
+        updateIndicators();
+      });
+    });
+
+    const ANALYZING_SELECTION_STORAGE_KEY = "analyzing-selected-ids";
+
+    function loadStoredSelections() {
+      try {
+        const raw = localStorage.getItem(ANALYZING_SELECTION_STORAGE_KEY);
+        if (!raw) {
+          return new Set();
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+          return new Set();
+        }
+
+        return new Set(
+          parsed
+            .map((id) => String(id).trim().toUpperCase())
+            .filter((id) => id.length === 3),
+        );
+      } catch {
+        return new Set();
+      }
+    }
+
+    function persistCheckboxSelections() {
+      const selectedIds = getSelectableCheckboxes()
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.closest(".menu-table-row")?.dataset.id)
+        .filter(Boolean)
+        .map((id) => id.trim().toUpperCase());
+
+      localStorage.setItem(ANALYZING_SELECTION_STORAGE_KEY, JSON.stringify(selectedIds));
+    }
+
+    function restoreCheckboxSelections() {
+      const stored = loadStoredSelections();
+
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        const checkbox = row.querySelector(".analyzing-row-select");
+        if (!checkbox || checkbox.disabled) {
+          return;
+        }
+
+        checkbox.checked = stored.has(row.dataset.id);
+      });
+
+      syncSelectAllCheckbox();
+    }
+
+    function getSelectableCheckboxes() {
+      return Array.from(tbody.querySelectorAll(".analyzing-row-select:not(:disabled)"));
+    }
+
+    function syncSelectAllCheckbox() {
+      const selectAll = document.getElementById("analyzing-select-all");
+      if (!selectAll) {
+        return;
+      }
+
+      const selectable = getSelectableCheckboxes();
+      selectAll.disabled = selectable.length === 0;
+
+      if (selectable.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = selectable.filter((checkbox) => checkbox.checked).length;
+      selectAll.checked = checkedCount === selectable.length;
+      selectAll.indeterminate = checkedCount > 0 && checkedCount < selectable.length;
+    }
+
+    function highlightSelectedRow() {
+      const currentId = document.getElementById("welding-id")?.value;
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.id === currentId);
+      });
+    }
+
+    function updateRowAnalyzeState(id, hasAnalyze) {
+      const row = tbody?.querySelector(`.menu-table-row[data-id="${id}"]`);
+      if (!row) {
+        return;
+      }
+
+      row.dataset.hasAnalyze = hasAnalyze ? "1" : "0";
+
+      const checkbox = row.querySelector(".analyzing-row-select");
+      if (checkbox) {
+        checkbox.disabled = !hasAnalyze;
+        if (!hasAnalyze) {
+          checkbox.checked = false;
+        }
+      }
+
+      syncSelectAllCheckbox();
+      persistCheckboxSelections();
+    }
+
+    window.updateAnalyzingRowState = updateRowAnalyzeState;
+
+    const selectAllCheckbox = document.getElementById("analyzing-select-all");
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      selectAllCheckbox.addEventListener("change", () => {
+        const checked = selectAllCheckbox.checked;
+        getSelectableCheckboxes().forEach((checkbox) => {
+          checkbox.checked = checked;
+        });
+        selectAllCheckbox.indeterminate = false;
+        persistCheckboxSelections();
+      });
+    }
+
+    tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+      const checkbox = row.querySelector(".analyzing-row-select");
+      if (checkbox) {
+        checkbox.addEventListener("click", (event) => {
+          event.stopPropagation();
+        });
+
+        checkbox.addEventListener("change", () => {
+          syncSelectAllCheckbox();
+          persistCheckboxSelections();
+        });
+      }
+
+      row.addEventListener("click", () => {
+        const id = row.dataset.id;
+        if (!id || !window.setExperimentId) {
+          return;
+        }
+
+        window.setExperimentId(id);
+        highlightSelectedRow();
+      });
+    });
+
+    document.getElementById("welding-id")?.addEventListener("id-change", highlightSelectedRow);
+    highlightSelectedRow();
+    restoreCheckboxSelections();
+  }
+
+  (function () {
+    const idInput = document.getElementById("welding-id");
+    const generateButton = document.getElementById("analyzing-generate-button");
+    const statusEl = document.getElementById("analyzing-generate-status");
+    let isGenerating = false;
+
+    function setStatus(message, type = "") {
+      if (!statusEl) {
+        return;
+      }
+
+      statusEl.textContent = message;
+      statusEl.className = type
+        ? `analyzing-generate-status ${type}`
+        : "analyzing-generate-status";
+    }
+
+    function syncGenerateButton() {
+      if (!generateButton) {
+        return;
+      }
+
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      generateButton.disabled = isGenerating || id.length !== 3;
+    }
+
+    async function generateAnalyzingData() {
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      if (isGenerating || id.length !== 3) {
+        return;
+      }
+
+      isGenerating = true;
+      syncGenerateButton();
+      setStatus("Generiert...", "loading");
+
+      try {
+        const response = await fetch(`/api/analyzing/generate/${encodeURIComponent(id)}`, {
+          method: "POST",
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          setStatus(data.error || "Fehler beim Generieren.", "error");
+          return;
+        }
+
+        setStatus("Analyse gespeichert.", "success");
+        if (window.reloadAnalyzingGraphs) {
+          await window.reloadAnalyzingGraphs();
+        }
+        if (window.getActiveAnalyzingView?.() === "weld" && window.reloadAnalyzingWeldGraphs) {
+          await window.reloadAnalyzingWeldGraphs();
+        }
+        if (window.updateAnalyzingRowState) {
+          window.updateAnalyzingRowState(id, Boolean(data.has_analyze));
+        }
+      } catch {
+        setStatus("Verbindungsfehler.", "error");
+      } finally {
+        isGenerating = false;
+        syncGenerateButton();
+      }
+    }
+
+    if (generateButton) {
+      generateButton.addEventListener("click", generateAnalyzingData);
+    }
+
+    if (idInput) {
+      idInput.addEventListener("id-change", syncGenerateButton);
+      syncGenerateButton();
+    }
+  })();
+
+  (function () {
+    const viewButtons = document.querySelectorAll(".analyzing-view-button");
+    const scanView = document.getElementById("analyzing-scan-view");
+    const weldView = document.getElementById("analyzing-weld-view");
+    const profileControls = document.getElementById("analyzing-profile-controls");
+
+    function getActiveAnalyzingView() {
+      return weldView && !weldView.hidden ? "weld" : "scan";
+    }
+
+    function setAnalyzingView(view) {
+      const activeView = view === "weld" ? "weld" : "scan";
+
+      viewButtons.forEach((button) => {
+        const isActive = button.dataset.view === activeView;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+      });
+
+      if (scanView) {
+        scanView.hidden = activeView !== "scan";
+      }
+
+      if (weldView) {
+        weldView.hidden = activeView !== "weld";
+      }
+
+      if (profileControls) {
+        profileControls.hidden = activeView !== "scan";
+      }
+
+      if (activeView === "weld" && window.reloadAnalyzingWeldGraphs) {
+        window.reloadAnalyzingWeldGraphs();
+      } else if (activeView === "scan" && window.reloadAnalyzingGraphs) {
+        window.reloadAnalyzingGraphs();
+      }
+    }
+
+    viewButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        setAnalyzingView(button.dataset.view);
+      });
+    });
+
+    window.getActiveAnalyzingView = getActiveAnalyzingView;
+    setAnalyzingView("scan");
+  })();
+
+  (function () {
+    const idInput = document.getElementById("welding-id");
+    const profileSlider = document.getElementById("analyzing-profile-slider");
+    const profileValue = document.getElementById("analyzing-profile-value");
+    const analyzingCanvas = document.getElementById("analyzing-graph-canvas");
+    const scanningCanvas = document.getElementById("analyzing-scan-graph-canvas");
+    const heatmapCanvas = document.getElementById("analyzing-heatmap-canvas");
+    const HEATMAP_AXIS_MARGIN = { top: 12, bottom: 36 };
+    let analyzingChart = null;
+    let scanningChart = null;
+    let heatmapData = null;
+    let heatmapProfileIndex = 0;
+    let isLoadingGraphs = false;
+    let currentProfileCount = 0;
+    let profileYValues = [];
+
+    function destroyChart(chart) {
+      if (chart) {
+        chart.destroy();
+      }
+    }
+
+    function formatProfileSliderLabel(profileIndex, maxIndex, activeYMm = null) {
+      const indexText = `${profileIndex} / ${maxIndex}`;
+      const yValue = activeYMm ?? profileYValues?.[profileIndex];
+      if (yValue == null || Number.isNaN(Number(yValue))) {
+        return indexText;
+      }
+
+      const yText = Number(yValue).toLocaleString("de-DE", { maximumFractionDigits: 1 });
+      return `${indexText} · y ${yText} mm`;
+    }
+
+    function updateProfileSlider(profileIndex, profileCount, activeYMm = null) {
+      if (!profileSlider || !profileValue) {
+        return;
+      }
+
+      currentProfileCount = Math.max(profileCount, 0);
+      const maxIndex = Math.max(currentProfileCount - 1, 0);
+      const activeIndex = Math.min(profileIndex, maxIndex);
+      profileSlider.min = "0";
+      profileSlider.max = String(maxIndex);
+      profileSlider.value = String(activeIndex);
+      profileSlider.disabled = currentProfileCount <= 1;
+      profileValue.textContent = formatProfileSliderLabel(activeIndex, maxIndex, activeYMm);
+    }
+
+    async function loadProfileYValues(id) {
+      profileYValues = [];
+      if (!id || id.length !== 3) {
+        return;
+      }
+
+      const endpoints = [
+        `/api/analyzing/${encodeURIComponent(id)}/heatmap`,
+        `/api/scanning/${encodeURIComponent(id)}/profile-y`,
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint);
+          const data = await response.json();
+          if (response.ok && Array.isArray(data.y_mm) && data.y_mm.length > 0) {
+            profileYValues = data.y_mm;
+            return;
+          }
+        } catch {
+          // try next source
+        }
+      }
+    }
+
+    function getXAxisRange(data) {
+      if (!data?.x_mm?.length) {
+        return null;
+      }
+
+      const values = data.x_mm.map((value) => Number.parseFloat(value));
+      return {
+        min: Math.min(...values),
+        max: Math.max(...values),
+      };
+    }
+
+    function renderProfileChart(canvas, existingChart, data, options) {
+      if (!canvas || typeof Chart === "undefined") {
+        return existingChart;
+      }
+
+      destroyChart(existingChart);
+
+      const points = data.x_mm
+        .map((xValue, index) => ({
+          x: Number.parseFloat(xValue),
+          y: Number.parseFloat(data.z_mm[index]),
+        }))
+        .sort((left, right) => left.x - right.x);
+
+      return new Chart(canvas, {
+        type: "line",
+        data: {
+          datasets: [
+            {
+              label: "Höhe z [mm]",
+              data: points,
+              borderColor: options.color,
+              backgroundColor: options.backgroundColor,
+              borderWidth: 1.5,
+              pointRadius: 0,
+              pointHitRadius: 12,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          animation: false,
+          interaction: {
+            mode: "nearest",
+            axis: "x",
+            intersect: false,
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#f8fafc",
+              },
+            },
+            title: {
+              display: false,
+            },
+            tooltip: {
+              callbacks: buildPrimaryYTooltipCallbacks("x [mm]"),
+            },
+          },
+          scales: {
+            x: {
+              type: "linear",
+              min: options.xAxisRange?.min,
+              max: options.xAxisRange?.max,
+              title: {
+                display: true,
+                text: "x [mm]",
+                color: "#94a3b8",
+              },
+              ticks: {
+                color: "#94a3b8",
+                maxTicksLimit: 8,
+              },
+              grid: {
+                color: "#334155",
+              },
+            },
+            y: {
+              type: "linear",
+              afterFit(axis) {
+                axis.width = 52;
+              },
+              title: {
+                display: true,
+                text: "z [mm]",
+                color: options.color,
+              },
+              ticks: {
+                color: options.color,
+              },
+              grid: {
+                color: "#334155",
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function zToHeatmapColor(zValue, zScaleMin, zScaleMax) {
+      if (zValue <= 0 || zScaleMax <= zScaleMin) {
+        return [15, 23, 42];
+      }
+
+      const t = Math.min(1, Math.max(0, (zValue - zScaleMin) / (zScaleMax - zScaleMin)));
+      return [
+        Math.round(15 + (167 - 15) * t),
+        Math.round(23 + (139 - 23) * t),
+        Math.round(42 + (250 - 42) * t),
+      ];
+    }
+
+    function updateHeatmapLegend(zScaleMin, zScaleMax) {
+      const minEl = document.getElementById("analyzing-heatmap-scale-min");
+      const maxEl = document.getElementById("analyzing-heatmap-scale-max");
+      if (!minEl || !maxEl) {
+        return;
+      }
+
+      if (zScaleMax <= zScaleMin) {
+        minEl.textContent = "–";
+        maxEl.textContent = "–";
+        return;
+      }
+
+      minEl.textContent = `${formatTooltipNumber(zScaleMin)} mm`;
+      maxEl.textContent = `${formatTooltipNumber(zScaleMax)} mm`;
+    }
+
+    function formatHeatmapAxisNumber(value) {
+      if (value == null || Number.isNaN(Number(value))) {
+        return "";
+      }
+
+      return Number(value).toLocaleString("de-DE", { maximumFractionDigits: 1 });
+    }
+
+    function getHeatmapYRange(data) {
+      const profileCount = data.profile_count;
+      if (
+        Array.isArray(data.y_mm)
+        && data.y_mm.length === profileCount
+        && Number.isFinite(data.y_min)
+        && Number.isFinite(data.y_max)
+        && data.y_max > data.y_min
+      ) {
+        return { yMin: data.y_min, yMax: data.y_max, yValues: data.y_mm };
+      }
+
+      const yMin = 0;
+      const yMax = Math.max(profileCount - 1, 1);
+      const yValues = Array.from({ length: profileCount }, (_, index) => index);
+      return { yMin, yMax, yValues };
+    }
+
+    function getChartPlotArea() {
+      const charts = [scanningChart, analyzingChart].filter(Boolean);
+      if (!charts.length) {
+        return null;
+      }
+
+      for (const chart of charts) {
+        chart.resize();
+      }
+
+      const referenceChart = scanningChart || analyzingChart;
+      const { left, right } = referenceChart.chartArea || {};
+      if (!Number.isFinite(left) || !Number.isFinite(right) || right <= left) {
+        return null;
+      }
+
+      return { left, width: right - left };
+    }
+
+    function getHeatmapLegendHeight(panel) {
+      const legend = panel?.querySelector(".analyzing-heatmap-legend");
+      return legend?.offsetHeight || 22;
+    }
+
+    function updateHeatmapPanelHeight(requiredCanvasHeight) {
+      const panel = heatmapCanvas?.parentElement;
+      if (!panel || !Number.isFinite(requiredCanvasHeight)) {
+        return;
+      }
+
+      const legendHeight = getHeatmapLegendHeight(panel);
+      panel.style.height = `${Math.ceil(requiredCanvasHeight + legendHeight)}px`;
+    }
+
+    function resetHeatmapPanelHeight() {
+      const panel = heatmapCanvas?.parentElement;
+      if (panel) {
+        panel.style.height = "";
+      }
+    }
+
+    function computeHeatmapLayout(width, height, data, plotArea = null) {
+      const margin = { left: 52, right: 16, top: HEATMAP_AXIS_MARGIN.top, bottom: HEATMAP_AXIS_MARGIN.bottom };
+      const xSpan = Math.max(data.x_max - data.x_min, 1e-9);
+      const { yMin, yMax } = getHeatmapYRange(data);
+      const ySpan = Math.max(yMax - yMin, 1e-9);
+
+      if (plotArea?.width > 0) {
+        const heatmapWidth = plotArea.width;
+        const mmPerPixel = heatmapWidth / xSpan;
+        const heatmapHeight = ySpan * mmPerPixel;
+        const requiredCanvasHeight = margin.top + heatmapHeight + margin.bottom;
+
+        return {
+          margin,
+          xSpan,
+          yMin,
+          yMax,
+          ySpan,
+          mmPerPixel,
+          heatmapLeft: plotArea.left,
+          heatmapTop: margin.top,
+          heatmapWidth,
+          heatmapHeight,
+          requiredCanvasHeight,
+          alignedToChart: true,
+        };
+      }
+
+      const innerWidth = Math.max(width - margin.left - margin.right, 1);
+      const innerHeight = Math.max(height - margin.top - margin.bottom, 1);
+      const mmPerPixel = Math.min(innerWidth / xSpan, innerHeight / ySpan);
+      const heatmapWidth = xSpan * mmPerPixel;
+      const heatmapHeight = ySpan * mmPerPixel;
+
+      return {
+        margin,
+        xSpan,
+        yMin,
+        yMax,
+        ySpan,
+        mmPerPixel,
+        heatmapLeft: margin.left + (innerWidth - heatmapWidth) / 2,
+        heatmapTop: margin.top + (innerHeight - heatmapHeight) / 2,
+        heatmapWidth,
+        heatmapHeight,
+        requiredCanvasHeight: null,
+        alignedToChart: false,
+      };
+    }
+
+    function getProfileYBounds(profileIndex, data, yRange) {
+      const count = data.profile_count;
+      const { yMin, yMax, yValues } = yRange;
+
+      if (yValues.length === count && yMax > yMin) {
+        const yLow = profileIndex === 0
+          ? yMin
+          : (yValues[profileIndex - 1] + yValues[profileIndex]) / 2;
+        const yHigh = profileIndex === count - 1
+          ? yMax
+          : (yValues[profileIndex] + yValues[profileIndex + 1]) / 2;
+        return { yLow, yHigh };
+      }
+
+      const step = (yMax - yMin) / Math.max(count - 1, 1);
+      return {
+        yLow: yMin + profileIndex * step - (profileIndex === 0 ? 0 : step / 2),
+        yHigh: yMin + profileIndex * step + (profileIndex === count - 1 ? 0 : step / 2),
+      };
+    }
+
+    function getDataColumnXBounds(dataColumn, data) {
+      const resolution = data.resolution;
+      const xSpan = data.x_max - data.x_min;
+      const cellSpan = xSpan / resolution;
+      const xCenter = data.x_reversed
+        ? data.x_max - dataColumn * cellSpan
+        : data.x_min + dataColumn * cellSpan;
+
+      return {
+        xLow: xCenter - cellSpan / 2,
+        xHigh: xCenter + cellSpan / 2,
+        dataColumn,
+      };
+    }
+
+    function heatmapMmXToPixel(xMm, layout, data) {
+      return layout.heatmapLeft + ((xMm - data.x_min) / layout.xSpan) * layout.heatmapWidth;
+    }
+
+    function heatmapMmYToPixel(yMm, layout) {
+      return layout.heatmapTop
+        + layout.heatmapHeight
+        - ((yMm - layout.yMin) / layout.ySpan) * layout.heatmapHeight;
+    }
+
+    function drawHeatmapAxes(context, layout, data) {
+      const { heatmapLeft, heatmapTop, heatmapWidth, heatmapHeight, yMin, yMax } = layout;
+      const xAxisY = heatmapTop + heatmapHeight;
+
+      context.strokeStyle = "#64748b";
+      context.fillStyle = "#94a3b8";
+      context.font = "11px system-ui, sans-serif";
+      context.lineWidth = 1;
+
+      context.beginPath();
+      context.moveTo(heatmapLeft, heatmapTop);
+      context.lineTo(heatmapLeft, xAxisY);
+      context.lineTo(heatmapLeft + heatmapWidth, xAxisY);
+      context.stroke();
+
+      const xTicks = [data.x_min, data.x_max];
+      for (const tick of xTicks) {
+        const x = heatmapMmXToPixel(tick, layout, data);
+        context.beginPath();
+        context.moveTo(x, xAxisY);
+        context.lineTo(x, xAxisY + 4);
+        context.stroke();
+        context.textAlign = "center";
+        context.textBaseline = "top";
+        context.fillText(formatHeatmapAxisNumber(tick), x, xAxisY + 6);
+      }
+
+      const yTicks = [yMin, yMax];
+      for (const tick of yTicks) {
+        const y = heatmapMmYToPixel(tick, layout);
+        context.beginPath();
+        context.moveTo(heatmapLeft - 4, y);
+        context.lineTo(heatmapLeft, y);
+        context.stroke();
+        context.textAlign = "right";
+        context.textBaseline = "middle";
+        context.fillText(formatHeatmapAxisNumber(tick), heatmapLeft - 6, y);
+      }
+
+      context.textAlign = "center";
+      context.textBaseline = "top";
+      context.fillText("x [mm]", heatmapLeft + heatmapWidth / 2, xAxisY + 22);
+
+      context.save();
+      context.translate(heatmapLeft - 38, heatmapTop + heatmapHeight / 2);
+      context.rotate(-Math.PI / 2);
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText("y [mm]", 0, 0);
+      context.restore();
+    }
+
+    function profileIndexToMarkerY(profileIndex, data, layout) {
+      const yRange = getHeatmapYRange(data);
+      const yValue = yRange.yValues[profileIndex];
+      if (!Number.isFinite(yValue)) {
+        const fallbackYm = layout.yMin
+          + (profileIndex / Math.max(data.profile_count - 1, 1)) * layout.ySpan;
+        return heatmapMmYToPixel(fallbackYm, layout);
+      }
+
+      return heatmapMmYToPixel(yValue, layout);
+    }
+
+    function renderHeatmap(data, profileIndex = 0) {
+      if (!heatmapCanvas || !data?.values?.length) {
+        return;
+      }
+
+      heatmapData = data;
+      heatmapProfileIndex = profileIndex;
+
+      analyzingChart?.resize();
+      scanningChart?.resize();
+
+      const parent = heatmapCanvas.parentElement;
+      const width = Math.max(parent?.clientWidth ?? 0, 1);
+      const plotArea = getChartPlotArea();
+      const layout = computeHeatmapLayout(width, 0, data, plotArea);
+
+      if (layout.alignedToChart && layout.requiredCanvasHeight) {
+        updateHeatmapPanelHeight(layout.requiredCanvasHeight);
+      }
+
+      const legendHeight = getHeatmapLegendHeight(parent);
+      const height = layout.requiredCanvasHeight
+        ?? Math.max(parent?.clientHeight ?? 0, legendHeight + 1) - legendHeight;
+      const pixelRatio = window.devicePixelRatio || 1;
+      heatmapCanvas.width = Math.floor(width * pixelRatio);
+      heatmapCanvas.height = Math.floor(Math.max(height, 1) * pixelRatio);
+      heatmapCanvas.style.width = `${width}px`;
+      heatmapCanvas.style.height = `${Math.max(height, 1)}px`;
+
+      const context = heatmapCanvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, Math.max(height, 1));
+
+      const profileCount = data.profile_count;
+      const resolution = data.resolution;
+      const zScaleMin = data.z_scale_min;
+      const zScaleMax = data.z_scale_max;
+      updateHeatmapLegend(zScaleMin, zScaleMax);
+      const yRange = getHeatmapYRange(data);
+
+      for (let profile = 0; profile < profileCount; profile += 1) {
+        const { yLow, yHigh } = getProfileYBounds(profile, data, yRange);
+        const pxTop = heatmapMmYToPixel(yHigh, layout);
+        const pxBottom = heatmapMmYToPixel(yLow, layout);
+
+        for (let dataColumn = 0; dataColumn < resolution; dataColumn += 1) {
+          const { xLow, xHigh } = getDataColumnXBounds(dataColumn, data);
+          const pxLeft = heatmapMmXToPixel(xLow, layout, data);
+          const pxRight = heatmapMmXToPixel(xHigh, layout, data);
+          const zValue = data.values[profile * resolution + dataColumn];
+          const [red, green, blue] = zToHeatmapColor(zValue, zScaleMin, zScaleMax);
+          context.fillStyle = `rgb(${red}, ${green}, ${blue})`;
+          context.fillRect(pxLeft, pxTop, pxRight - pxLeft + 0.5, pxBottom - pxTop + 0.5);
+        }
+      }
+
+      drawHeatmapAxes(context, layout, data);
+
+      const markerY = profileIndexToMarkerY(profileIndex, data, layout);
+      context.strokeStyle = "#f8fafc";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(layout.heatmapLeft, markerY);
+      context.lineTo(layout.heatmapLeft + layout.heatmapWidth, markerY);
+      context.stroke();
+    }
+
+    function clearHeatmap() {
+      heatmapData = null;
+      heatmapProfileIndex = 0;
+      updateHeatmapLegend(0, 0);
+      resetHeatmapPanelHeight();
+      if (!heatmapCanvas) {
+        return;
+      }
+
+      const context = heatmapCanvas.getContext("2d");
+      if (!context) {
+        return;
+      }
+
+      context.clearRect(0, 0, heatmapCanvas.width, heatmapCanvas.height);
+    }
+
+    function clearGraphs() {
+      destroyChart(analyzingChart);
+      destroyChart(scanningChart);
+      analyzingChart = null;
+      scanningChart = null;
+      profileYValues = [];
+      clearHeatmap();
+      updateProfileSlider(0, 0);
+      if (profileSlider) {
+        profileSlider.disabled = true;
+      }
+    }
+
+    async function fetchProfileGraph(endpoint, id, profileIndex) {
+      const response = await fetch(
+        `${endpoint}/${encodeURIComponent(id)}/graph?profile=${encodeURIComponent(profileIndex)}`,
+      );
+      const data = await response.json();
+      return { response, data };
+    }
+
+    async function loadAnalyzingGraphs(id, profileIndex = 0, showErrors = true) {
+      if (!id || id.length !== 3) {
+        clearGraphs();
+        return;
+      }
+
+      isLoadingGraphs = true;
+
+      try {
+        const [analyzeResult, scanResult, heatmapResult] = await Promise.all([
+          fetchProfileGraph("/api/analyzing", id, profileIndex),
+          fetchProfileGraph("/api/scanning", id, profileIndex),
+          fetch(`/api/analyzing/${encodeURIComponent(id)}/heatmap`).then(async (response) => ({
+            response,
+            data: await response.json(),
+          })),
+        ]);
+
+        const profileCount = Math.max(
+          analyzeResult.response.ok ? analyzeResult.data.profile_count : 0,
+          scanResult.response.ok ? scanResult.data.profile_count : 0,
+        );
+        const xAxisRange = scanResult.response.ok
+          ? getXAxisRange(scanResult.data)
+          : analyzeResult.response.ok
+            ? getXAxisRange(analyzeResult.data)
+            : null;
+
+        if (!analyzeResult.response.ok) {
+          destroyChart(analyzingChart);
+          analyzingChart = null;
+        } else {
+          analyzingChart = renderProfileChart(analyzingCanvas, analyzingChart, analyzeResult.data, {
+            color: "#a78bfa",
+            backgroundColor: "#a78bfa33",
+            xAxisRange,
+          });
+        }
+
+        if (!scanResult.response.ok) {
+          destroyChart(scanningChart);
+          scanningChart = null;
+        } else {
+          scanningChart = renderProfileChart(scanningCanvas, scanningChart, scanResult.data, {
+            color: "#38bdf8",
+            backgroundColor: "#38bdf833",
+            xAxisRange,
+          });
+        }
+
+        const activeProfileIndex = analyzeResult.response.ok
+          ? analyzeResult.data.profile_index
+          : scanResult.response.ok
+            ? scanResult.data.profile_index
+            : profileIndex;
+        const activeYMm = analyzeResult.response.ok
+          ? analyzeResult.data.y_mm
+          : scanResult.response.ok
+            ? scanResult.data.y_mm
+            : null;
+
+        await loadProfileYValues(id);
+
+        if (heatmapResult.response.ok) {
+          profileYValues = Array.isArray(heatmapResult.data.y_mm) ? heatmapResult.data.y_mm : profileYValues;
+          renderHeatmap(heatmapResult.data, activeProfileIndex);
+        } else {
+          clearHeatmap();
+        }
+
+        updateProfileSlider(activeProfileIndex, profileCount, activeYMm);
+
+        if (!analyzeResult.response.ok && !scanResult.response.ok && showErrors) {
+          updateProfileSlider(0, 0);
+          if (profileSlider) {
+            profileSlider.disabled = true;
+          }
+        }
+      } catch {
+        clearGraphs();
+      } finally {
+        isLoadingGraphs = false;
+      }
+    }
+
+    function handleIdChange() {
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      if (window.getActiveAnalyzingView?.() === "weld") {
+        if (window.reloadAnalyzingWeldGraphs) {
+          window.reloadAnalyzingWeldGraphs();
+        }
+        return;
+      }
+
+      loadAnalyzingGraphs(id, 0, false);
+    }
+
+    if (profileSlider) {
+      profileSlider.addEventListener("input", () => {
+        const maxIndex = Number.parseInt(profileSlider.max, 10);
+        const activeIndex = Number.parseInt(profileSlider.value, 10);
+        if (profileValue) {
+          profileValue.textContent = formatProfileSliderLabel(
+            activeIndex,
+            maxIndex,
+            profileYValues?.[activeIndex] ?? null,
+          );
+        }
+
+        if (heatmapData) {
+          renderHeatmap(heatmapData, activeIndex);
+        }
+      });
+
+      profileSlider.addEventListener("change", () => {
+        const id = String(idInput?.value ?? "").trim().toUpperCase();
+        if (!id || id.length !== 3 || isLoadingGraphs) {
+          return;
+        }
+
+        const nextProfileIndex = Number.parseInt(profileSlider.value, 10);
+        if (heatmapData) {
+          renderHeatmap(heatmapData, nextProfileIndex);
+        }
+
+        loadAnalyzingGraphs(id, nextProfileIndex, false);
+      });
+    }
+
+    if (heatmapCanvas) {
+      window.addEventListener("resize", () => {
+        analyzingChart?.resize();
+        scanningChart?.resize();
+        if (heatmapData) {
+          renderHeatmap(heatmapData, heatmapProfileIndex);
+        }
+      });
+    }
+
+    if (idInput) {
+      idInput.addEventListener("id-change", handleIdChange);
+      handleIdChange();
+    }
+
+    window.reloadAnalyzingGraphs = function (profileIndex = Number.parseInt(profileSlider?.value ?? "0", 10)) {
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      return loadAnalyzingGraphs(id, profileIndex, false);
+    };
+  })();
+
+  (function () {
+    const idInput = document.getElementById("welding-id");
+    const analyzeWeldCanvas = document.getElementById("analyzing-weld-graph-canvas");
+    const rawWeldCanvas = document.getElementById("analyzing-raw-weld-graph-canvas");
+    const WELD_GRAPH_COLORS = ["#38bdf8", "#fbbf24"];
+    let analyzeWeldChart = null;
+    let rawWeldChart = null;
+    let isLoadingWeldGraphs = false;
+
+    function destroyChart(chart) {
+      if (chart) {
+        chart.destroy();
+      }
+    }
+
+    function getTimeAxisRange(data) {
+      if (!data?.time_s?.length) {
+        return null;
+      }
+
+      const values = data.time_s.map((value) => Number.parseFloat(value));
+      return {
+        min: Math.min(...values),
+        max: Math.max(...values),
+      };
+    }
+
+    function renderWeldingChart(canvas, existingChart, data, options = {}) {
+      if (!canvas || typeof Chart === "undefined") {
+        return existingChart;
+      }
+
+      destroyChart(existingChart);
+
+      const scales = {
+        x: {
+          type: "linear",
+          min: options.xAxisRange?.min,
+          max: options.xAxisRange?.max,
+          title: {
+            display: true,
+            text: "Zeit [s]",
+            color: "#94a3b8",
+          },
+          ticks: {
+            color: "#94a3b8",
+            maxTicksLimit: 8,
+          },
+          grid: {
+            color: "#334155",
+          },
+        },
+      };
+
+      const datasets = (data.channels || []).map((channel, index) => {
+        const axisId = `y-${index}`;
+        const color = WELD_GRAPH_COLORS[index % WELD_GRAPH_COLORS.length];
+
+        scales[axisId] = {
+          type: "linear",
+          position: index === 0 ? "left" : "right",
+          title: {
+            display: true,
+            text: channel.name,
+            color,
+          },
+          ticks: {
+            color,
+          },
+          grid: {
+            color: "#334155",
+            drawOnChartArea: index === 0,
+          },
+        };
+
+        return {
+          label: channel.name,
+          data: channel.values
+            .map((value, valueIndex) => ({
+              x: Number.parseFloat(data.time_s[valueIndex]),
+              y: Number.parseFloat(value),
+            }))
+            .sort((left, right) => left.x - right.x),
+          borderColor: color,
+          backgroundColor: `${color}33`,
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHitRadius: 12,
+          yAxisID: axisId,
+        };
+      });
+
+      return new Chart(canvas, {
+        type: "line",
+        data: { datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          animation: false,
+          interaction: {
+            mode: "nearest",
+            axis: "x",
+            intersect: false,
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#f8fafc",
+              },
+            },
+            title: {
+              display: false,
+            },
+            tooltip: {
+              callbacks: buildPrimaryYTooltipCallbacks("Zeit [s]"),
+            },
+          },
+          scales,
+        },
+      });
+    }
+
+    function clearWeldGraphs() {
+      destroyChart(analyzeWeldChart);
+      destroyChart(rawWeldChart);
+      analyzeWeldChart = null;
+      rawWeldChart = null;
+    }
+
+    async function fetchWeldingGraph(endpoint, id) {
+      const response = await fetch(`${endpoint}/${encodeURIComponent(id)}/graph`);
+      const data = await response.json();
+      return { response, data };
+    }
+
+    async function loadAnalyzingWeldGraphs(id, showErrors = true) {
+      if (!id || id.length !== 3) {
+        clearWeldGraphs();
+        return;
+      }
+
+      isLoadingWeldGraphs = true;
+
+      try {
+        const [analyzeResult, rawResult] = await Promise.all([
+          fetch(`/api/analyzing/${encodeURIComponent(id)}/weld-graph`).then(async (response) => ({
+            response,
+            data: await response.json(),
+          })),
+          fetchWeldingGraph("/api/welding", id),
+        ]);
+
+        const xAxisRange = rawResult.response.ok ? getTimeAxisRange(rawResult.data) : null;
+
+        if (!analyzeResult.response.ok) {
+          destroyChart(analyzeWeldChart);
+          analyzeWeldChart = null;
+        } else if (xAxisRange) {
+          analyzeWeldChart = renderWeldingChart(
+            analyzeWeldCanvas,
+            analyzeWeldChart,
+            analyzeResult.data,
+            { xAxisRange },
+          );
+        } else {
+          analyzeWeldChart = renderWeldingChart(
+            analyzeWeldCanvas,
+            analyzeWeldChart,
+            analyzeResult.data,
+          );
+        }
+
+        if (!rawResult.response.ok) {
+          destroyChart(rawWeldChart);
+          rawWeldChart = null;
+        } else {
+          rawWeldChart = renderWeldingChart(rawWeldCanvas, rawWeldChart, rawResult.data, {
+            xAxisRange: xAxisRange ?? getTimeAxisRange(rawResult.data),
+          });
+        }
+
+        if (!analyzeResult.response.ok && !rawResult.response.ok && showErrors) {
+          clearWeldGraphs();
+        }
+      } catch {
+        clearWeldGraphs();
+      } finally {
+        isLoadingWeldGraphs = false;
+      }
+    }
+
+    function handleIdChange() {
+      if (window.getActiveAnalyzingView?.() !== "weld") {
+        return;
+      }
+
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      loadAnalyzingWeldGraphs(id, false);
+    }
+
+    if (idInput) {
+      idInput.addEventListener("id-change", handleIdChange);
+    }
+
+    window.reloadAnalyzingWeldGraphs = function () {
+      const id = String(idInput?.value ?? "").trim().toUpperCase();
+      return loadAnalyzingWeldGraphs(id, false);
+    };
+  })();
+</script>
+{% endblock %}

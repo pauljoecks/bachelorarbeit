@@ -14,29 +14,32 @@ import pandas as pd
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
 from openpyxl import load_workbook
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 DEFAULT_VERSUCHSUEBERSICHT = BASE_DIR / "data" / "Versuchsübersicht.xlsx"
 DEFAULT_VERSUCHSUEBERSICHT_PATH = "data/Versuchsübersicht.xlsx"
 
-app = Flask(__name__, template_folder="templates")
+app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 
 versuchsuebersicht_path = None
 versuchsuebersicht_data = None
 _scan_document_cache = {}
 _scan_jobs = {}
 _scan_jobs_lock = threading.Lock()
+_excel_workbook_lock = threading.Lock()
 _weld_jobs = {}
 _weld_jobs_lock = threading.Lock()
 _weld_abort_events = {}
 
 MENU_TABLE_COLUMNS = ["COUNT", "ID", "WELDED", "SCANNED", "SERIES", "NUMBER", "COMMENT"]
+ANALYZING_TABLE_COLUMNS = ["COUNT", "ID", "WELDED", "SCANNED"]
 MENU_FILTER_OPTIONS = ["WELDED", "SCANNED", "ID"]
 WELDING_FORM_COLUMNS = ["PATH ID", "WFS [m/min]", "WS [m/min]", "SERIES", "NUMBER", "COMMENT"]
+SCANSPEED_COLUMN = "SCANSPEED [mm/s]"
 WELDING_PARAM_TABLE_COLUMNS = [
     ["SERIES", "NUMBER", "WFS [m/min]", "WS [m/min]", "WELDED", "H5FILE"],
     ["WIRE", "WIREDIA [mm]", "GAS", "GASFLOW [l/min]", "POWERSOURCE", "PROCESS"],
-    ["RESOLUTION", "PROFILEFREQUENCY", "EXPOSURE", "SCANDURATION", "SCANNED", "JSONFILE"],
+    ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION", "SCANNED", "JSONFILE"],
 ]
 WELDING_PARAM_READONLY_COLUMNS = {
     "WELDED",
@@ -49,7 +52,7 @@ WELDING_PARAM_READONLY_COLUMNS = {
     "PROCESS",
     "RESOLUTION",
     "PROFILEFREQUENCY",
-    "EXPOSURE",
+    SCANSPEED_COLUMN,
     "SCANDURATION",
     "SCANNED",
     "JSONFILE",
@@ -57,7 +60,7 @@ WELDING_PARAM_READONLY_COLUMNS = {
 SCANNING_EDITABLE_COLUMNS = [
     "RESOLUTION",
     "PROFILEFREQUENCY",
-    "EXPOSURE",
+    SCANSPEED_COLUMN,
     "SCANDURATION",
     "COMMENT",
 ]
@@ -69,17 +72,21 @@ SCANNING_PARAM_READONLY_COLUMNS = {
         for block in WELDING_PARAM_TABLE_COLUMNS
         for field_name in block
     )
-    if name not in {"RESOLUTION", "PROFILEFREQUENCY", "EXPOSURE", "SCANDURATION"}
+    if name not in {"RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION"}
 }
 PATH_ID_OPTIONS = ["SO", "PO", "SI", "ME", "LI"]
 PATH_IMAGES_DIR = TEMPLATES_DIR / "path_images"
 WELDING_DATA_DIR = BASE_DIR / "data" / "welding"
 SCANNING_DATA_DIR = BASE_DIR / "data" / "scanning"
+ANALYZING_DATA_DIR = BASE_DIR / "data" / "analyzing"
 SCAN_SCRIPT_PATH = BASE_DIR / "scripts" / "run_scan.py"
 WELD_SCRIPT_PATH = BASE_DIR / "scripts" / "run_weld.py"
 WELDING_METADATA_COLUMNS = ["H5FILE"]
 SCANNING_METADATA_COLUMNS = ["JSONFILE"]
-SCAN_SETTINGS_COLUMNS = ["RESOLUTION", "PROFILEFREQUENCY", "EXPOSURE", "SCANDURATION"]
+ANALYZING_METADATA_COLUMNS = ["ANALYZESCAN", "ANALYZEWELD"]
+SCAN_SETTINGS_COLUMNS = ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION"]
+SCANNING_PRESCAN_EXCEL_COLUMNS = SCAN_SETTINGS_COLUMNS
+SCAN_DEFAULT_EXPOSURE_US = 100
 SCAN_RESOLUTION_OPTIONS = [160, 320, 640, 1280]
 SCAN_DURATION_AUTO_SECONDS = 1.0
 EXCEL_INTEGER_COLUMNS = {
@@ -87,12 +94,12 @@ EXCEL_INTEGER_COLUMNS = {
     "NUMBER",
     "RESOLUTION",
     "PROFILEFREQUENCY",
-    "EXPOSURE",
 }
 EXCEL_FLOAT_COLUMNS = {
     "WFS [m/min]",
     "WS [m/min]",
     "SCANDURATION",
+    SCANSPEED_COLUMN,
 }
 EXCEL_NUMERIC_COLUMNS = EXCEL_INTEGER_COLUMNS | EXCEL_FLOAT_COLUMNS
 SCAN_USE_DEMO = os.environ.get("SCAN_USE_DEMO", "").strip().lower() in {"1", "true", "yes"}
@@ -180,6 +187,7 @@ def _required_excel_column_names():
         + WELDING_FORM_COLUMNS
         + WELDING_METADATA_COLUMNS
         + SCANNING_METADATA_COLUMNS
+        + ANALYZING_METADATA_COLUMNS
         + _flat_welding_param_columns()
     )
     return sorted(required)
@@ -277,10 +285,6 @@ def _get_scan_settings_from_row(row):
         row.get(_find_column(columns, "RESOLUTION")),
         "RESOLUTION",
     )
-    exposure_us = _parse_positive_int_setting(
-        row.get(_find_column(columns, "EXPOSURE")),
-        "EXPOSURE",
-    )
     scan_duration_s = _parse_positive_float_setting(
         row.get(_find_column(columns, "SCANDURATION")),
         "SCANDURATION",
@@ -290,7 +294,7 @@ def _get_scan_settings_from_row(row):
     return _scan_settings_dict_from_values(
         resolution=resolution,
         profile_frequency=profile_frequency,
-        exposure_us=exposure_us,
+        exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         scan_duration_s=scan_duration_s,
     )
 
@@ -299,7 +303,7 @@ def _default_scan_settings():
     return _scan_settings_dict_from_values(
         resolution=640,
         profile_frequency=10.0,
-        exposure_us=100,
+        exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         scan_duration_s=1.0,
     )
 
@@ -309,6 +313,104 @@ def _parse_bool_setting(value):
         return value
     text = _format_cell_value(value).strip().lower()
     return text in {"1", "true", "yes", "on"}
+
+
+def _scan_settings_to_excel_fields(scan_settings, auto_scan_duration_s=None, scanspeed=None):
+    fields = {
+        "RESOLUTION": scan_settings["resolution"],
+        "PROFILEFREQUENCY": scan_settings["profile_frequency"],
+    }
+
+    if scan_settings.get("scan_duration_auto"):
+        if auto_scan_duration_s is not None:
+            fields["SCANDURATION"] = auto_scan_duration_s
+    else:
+        fields["SCANDURATION"] = scan_settings["scan_duration_s"]
+
+    if scanspeed is not None:
+        fields[SCANSPEED_COLUMN] = scanspeed
+
+    return fields
+
+
+def _get_scanspeed_from_row(row):
+    if versuchsuebersicht_data is None or row is None:
+        return ""
+
+    columns = versuchsuebersicht_data["columns"]
+    column = _find_column(columns, SCANSPEED_COLUMN)
+    if not column:
+        return ""
+
+    return _format_cell_value(row.get(column))
+
+
+def _resolve_scanspeed_value(scanspeed, row=None):
+    if scanspeed is not None:
+        text = str(scanspeed).strip()
+        if not text:
+            raise ValueError(f"{SCANSPEED_COLUMN} fehlt.")
+        return _parse_positive_float_setting(text, SCANSPEED_COLUMN)
+
+    value = _get_scanspeed_from_row(row)
+    if not value:
+        raise ValueError(f"{SCANSPEED_COLUMN} fehlt.")
+    return _parse_positive_float_setting(value, SCANSPEED_COLUMN)
+
+
+def _get_scan_geometry_from_row(row):
+    if versuchsuebersicht_data is None or row is None:
+        raise ValueError("Keine Versuchsübersicht geladen.")
+
+    columns = versuchsuebersicht_data["columns"]
+    scan_duration_s = _parse_positive_float_setting(
+        row.get(_find_column(columns, "SCANDURATION")),
+        "SCANDURATION",
+    )
+    scan_speed_mm_s = _resolve_scanspeed_value(_get_scanspeed_from_row(row), row)
+    return scan_speed_mm_s, scan_duration_s
+
+
+def _get_profile_y_mm_values(document, profiles, experiment_id=None):
+    run_scan = _import_run_scan()
+
+    if profiles and all(profile.get("y_mm") is not None for profile in profiles):
+        return [float(profile["y_mm"]) for profile in profiles]
+
+    scan_speed_mm_s = document.get("scan_speed_mm_s")
+    scan_duration_s = document.get("scan_duration_s")
+    scan_settings = document.get("scan_settings") or {}
+    if scan_speed_mm_s is None:
+        scan_speed_mm_s = scan_settings.get("scan_speed_mm_s")
+    if scan_duration_s is None:
+        try:
+            scan_duration_s = run_scan.extract_scan_duration_s(scan_settings)
+        except ValueError:
+            scan_duration_s = None
+
+    normalized_id = _normalize_id(experiment_id or document.get("experiment_id"))
+    if normalized_id and versuchsuebersicht_data:
+        row = versuchsuebersicht_data["id_index"].get(normalized_id)
+        if row is not None:
+            try:
+                excel_speed, excel_duration = _get_scan_geometry_from_row(row)
+                if scan_speed_mm_s is None:
+                    scan_speed_mm_s = excel_speed
+                if scan_duration_s is None:
+                    scan_duration_s = excel_duration
+            except ValueError:
+                pass
+
+    if scan_speed_mm_s is None or scan_duration_s is None:
+        raise ValueError("SCANSPEED oder SCANDURATION fehlen für y-Zuordnung.")
+
+    temp_profiles = [{"profile_index": index} for index in range(len(profiles))]
+    run_scan.assign_profile_y_mm(
+        temp_profiles,
+        scan_speed_mm_s=float(scan_speed_mm_s),
+        scan_duration_s=float(scan_duration_s),
+    )
+    return [float(item["y_mm"]) for item in temp_profiles]
 
 
 def _get_scan_settings_from_ui(payload):
@@ -330,7 +432,7 @@ def _get_scan_settings_from_ui(payload):
             payload.get("profile_frequency"),
             "PROFILEFREQUENCY",
         ),
-        exposure_us=_parse_positive_int_setting(payload.get("exposure_us"), "EXPOSURE"),
+        exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         scan_duration_s=scan_duration_s,
         scan_duration_auto=scan_duration_auto,
     )
@@ -352,7 +454,7 @@ def _get_scan_settings_for_experiment(experiment_id):
 
 def _get_live_profile_settings(experiment_id):
     query = request.args
-    required = ("resolution", "profile_frequency", "exposure_us", "scan_duration_s")
+    required = ("resolution", "profile_frequency", "scan_duration_s")
     if all(query.get(name) not in (None, "") for name in required):
         try:
             resolution = _parse_positive_int_setting(query.get("resolution"), "RESOLUTION")
@@ -360,7 +462,6 @@ def _get_live_profile_settings(experiment_id):
                 query.get("profile_frequency"),
                 "PROFILEFREQUENCY",
             )
-            exposure_us = _parse_positive_int_setting(query.get("exposure_us"), "EXPOSURE")
             scan_duration_s = _parse_positive_float_setting(
                 query.get("scan_duration_s"),
                 "SCANDURATION",
@@ -369,7 +470,7 @@ def _get_live_profile_settings(experiment_id):
                 _scan_settings_dict_from_values(
                     resolution=resolution,
                     profile_frequency=profile_frequency,
-                    exposure_us=exposure_us,
+                    exposure_us=SCAN_DEFAULT_EXPOSURE_US,
                     scan_duration_s=scan_duration_s,
                 ),
                 False,
@@ -396,6 +497,15 @@ def _import_run_weld():
     import run_weld
 
     return run_weld
+
+
+def _import_run_analyze():
+    scripts_dir = str(BASE_DIR / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import run_analyze
+
+    return run_analyze
 
 
 def _close_live_profile_preview():
@@ -572,10 +682,23 @@ def _extract_auto_scan_duration_s(scan_result):
     return round(float(duration_s), 1)
 
 
-def _run_scan_job(experiment_id, scan_settings, use_demo=False):
+def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
     normalized_id = _normalize_id(experiment_id)
     try:
         _set_scan_job(normalized_id, {"status": "running"})
+        row = versuchsuebersicht_data["id_index"].get(normalized_id) if versuchsuebersicht_data else None
+        resolved_scanspeed = _resolve_scanspeed_value(scanspeed, row)
+        if versuchsuebersicht_path is not None:
+            excel_path = Path(versuchsuebersicht_path)
+            _repair_orphaned_scan_metadata(normalized_id)
+            _save_scanning_fields_to_excel(
+                excel_path,
+                normalized_id,
+                _scan_settings_to_excel_fields(scan_settings, scanspeed=resolved_scanspeed),
+                editable_columns=SCANNING_PRESCAN_EXCEL_COLUMNS,
+            )
+            _load_versuchsuebersicht_from_path(excel_path)
+
         run_scan = _import_run_scan()
         run_scan.close_live_profile_preview()
         settings = _scan_settings_object(scan_settings)
@@ -585,12 +708,16 @@ def _run_scan_job(experiment_id, scan_settings, use_demo=False):
             demo=use_demo,
             scanner_ip=SCANNER_IP,
             settings=settings,
+            scan_speed_mm_s=resolved_scanspeed,
         )
+        auto_scan_duration_s = _extract_auto_scan_duration_s(result)
         updated_fields = _mark_experiment_scanned_in_excel(
             Path(versuchsuebersicht_path),
             normalized_id,
             result["json_file"],
-            auto_scan_duration_s=_extract_auto_scan_duration_s(result),
+            scan_settings=scan_settings,
+            auto_scan_duration_s=auto_scan_duration_s,
+            scanspeed=resolved_scanspeed,
         )
         _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
         result.pop("success", None)
@@ -784,6 +911,48 @@ def _get_table_rows(filter_column_name):
                 continue
 
             display_row[name] = _format_display_value(name, row.get(source_column))
+
+        rows.append(display_row)
+
+    return rows
+
+
+def _get_analyzing_table_rows():
+    if versuchsuebersicht_data is None:
+        return []
+
+    columns = versuchsuebersicht_data["columns"]
+    column_map = {name: _find_column(columns, name) for name in ANALYZING_TABLE_COLUMNS}
+    welded_column = _find_column(columns, "WELDED")
+    scanned_column = _find_column(columns, "SCANNED")
+
+    if welded_column is None or scanned_column is None:
+        return []
+
+    rows = []
+    for row in versuchsuebersicht_data["rows"]:
+        if not _has_value(row.get(welded_column)):
+            continue
+        if not _has_value(row.get(scanned_column)):
+            continue
+
+        display_row = {}
+        for name in ANALYZING_TABLE_COLUMNS:
+            source_column = column_map[name]
+            if not source_column:
+                display_row[name] = ""
+                continue
+
+            display_row[name] = _format_display_value(name, row.get(source_column))
+            if name in {"WELDED", "SCANNED"}:
+                parsed = _parse_excel_timestamp(row.get(source_column))
+                if parsed is not None:
+                    display_row[name] = parsed.strftime("%d.%m.%y %H:%M")
+
+        experiment_id = display_row.get("ID", "")
+        display_row["has_analyze"] = (
+            _experiment_has_valid_analyze(experiment_id) if experiment_id else False
+        )
 
         rows.append(display_row)
 
@@ -1009,6 +1178,16 @@ def _load_scanning_profile_graph(scan_path, profile_index):
 
     profile = profiles[profile_index]
     point_stats = _profile_point_stats(profile)
+    y_mm = profile.get("y_mm")
+    if y_mm is None:
+        try:
+            y_mm = _get_profile_y_mm_values(
+                document,
+                profiles,
+                experiment_id=document.get("experiment_id"),
+            )[profile_index]
+        except ValueError:
+            y_mm = None
     x_mm, z_mm = _filter_valid_profile_points(
         profile["x_mm"],
         profile["z_mm"],
@@ -1027,8 +1206,69 @@ def _load_scanning_profile_graph(scan_path, profile_index):
         "resolution": int(document.get("resolution") or len(profile.get("x_mm", []))),
         "demo_mode": bool(document.get("demo_mode")),
         "point_stats": point_stats,
+        "y_mm": y_mm,
         "x_mm": x_mm.tolist(),
         "z_mm": z_mm.tolist(),
+    }
+
+
+def _load_analyzing_scan_heatmap(analyze_path):
+    document = _load_scan_document(analyze_path)
+    profiles = document.get("profiles") or []
+    if not profiles:
+        raise ValueError("Keine Profile in Analyse-Datei gefunden.")
+
+    profile_count = len(profiles)
+    resolution = int(document.get("resolution") or len(profiles[0].get("x_mm", [])))
+    x_mm = profiles[0].get("x_mm") or []
+    if not x_mm:
+        raise ValueError("Keine x-Werte in Analyse-Datei gefunden.")
+
+    x_first = float(x_mm[0])
+    x_last = float(x_mm[-1])
+    x_min = min(x_first, x_last)
+    x_max = max(x_first, x_last)
+
+    values = []
+    positive_values = []
+    for profile in profiles:
+        z_row = [float(value) for value in profile.get("z_mm") or []]
+        if len(z_row) != resolution:
+            raise ValueError("Profilauflösung ist in der Analyse-Datei nicht konsistent.")
+        values.extend(z_row)
+        positive_values.extend(value for value in z_row if value > 0)
+
+    z_scale_min = 0.0
+    z_scale_max = 0.0
+    if positive_values:
+        sorted_values = sorted(positive_values)
+        lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
+        upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
+        z_scale_min = float(sorted_values[lower_index])
+        z_scale_max = float(sorted_values[upper_index])
+        if z_scale_max <= z_scale_min:
+            z_scale_min = float(sorted_values[0])
+            z_scale_max = float(sorted_values[-1])
+
+    y_mm = _get_profile_y_mm_values(
+        document,
+        profiles,
+        experiment_id=document.get("experiment_id"),
+    )
+
+    return {
+        "json_file": analyze_path.name,
+        "profile_count": profile_count,
+        "resolution": resolution,
+        "x_min": x_min,
+        "x_max": x_max,
+        "x_reversed": x_first > x_last,
+        "y_mm": y_mm,
+        "y_min": min(y_mm),
+        "y_max": max(y_mm),
+        "z_scale_min": z_scale_min,
+        "z_scale_max": z_scale_max,
+        "values": values,
     }
 
 
@@ -1046,6 +1286,121 @@ def _resolve_scan_path_for_experiment(experiment_id):
         return None, f"Scan-Datei nicht gefunden: {scan_filename}"
 
     return scan_path, None
+
+
+def _sanitize_analyze_filename(filename):
+    text = str(filename).strip()
+    if not text:
+        return None
+
+    name = Path(text).name
+    if not re.fullmatch(r"[\w.-]+\.json", name, re.IGNORECASE):
+        raise ValueError(f"Ungültiger Analyse-Dateiname: {name}")
+
+    return name
+
+
+def _get_experiment_analyze_filename(experiment_id):
+    if versuchsuebersicht_data is None:
+        return None
+
+    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
+    if row is None:
+        return None
+
+    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZESCAN")
+    if column is None:
+        return None
+
+    value = _format_cell_value(row.get(column))
+    if not value:
+        return None
+
+    return _sanitize_analyze_filename(value)
+
+
+def _resolve_analyze_path_for_experiment(experiment_id):
+    try:
+        analyze_filename = _get_experiment_analyze_filename(experiment_id)
+    except ValueError as exc:
+        return None, str(exc)
+
+    normalized_id = _normalize_id(experiment_id)
+    candidates = []
+    if analyze_filename:
+        candidates.append(analyze_filename)
+    default_filename = f"{normalized_id}.json"
+    if default_filename not in candidates:
+        candidates.append(default_filename)
+
+    for filename in candidates:
+        analyze_path = ANALYZING_DATA_DIR / filename
+        if analyze_path.is_file():
+            return analyze_path, None
+
+    if analyze_filename:
+        return None, f"Analyse-Datei nicht gefunden: {analyze_filename}"
+
+    return None, "Keine Analyse-Datei für diese ID."
+
+
+def _get_experiment_analyze_weld_filename(experiment_id):
+    if versuchsuebersicht_data is None:
+        return None
+
+    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
+    if row is None:
+        return None
+
+    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZEWELD")
+    if column is None:
+        return None
+
+    value = _format_cell_value(row.get(column))
+    if not value:
+        return None
+
+    return _sanitize_h5_filename(value)
+
+
+def _resolve_analyze_weld_path_for_experiment(experiment_id):
+    try:
+        analyze_weld_filename = _get_experiment_analyze_weld_filename(experiment_id)
+    except ValueError as exc:
+        return None, str(exc)
+
+    normalized_id = _normalize_id(experiment_id)
+    candidates = []
+    if analyze_weld_filename:
+        candidates.append(analyze_weld_filename)
+    default_filename = f"{normalized_id}.h5"
+    if default_filename not in candidates:
+        candidates.append(default_filename)
+
+    for filename in candidates:
+        analyze_weld_path = ANALYZING_DATA_DIR / filename
+        if analyze_weld_path.is_file():
+            return analyze_weld_path, None
+
+    if analyze_weld_filename:
+        return None, f"Analyse-H5-Datei nicht gefunden: {analyze_weld_filename}"
+
+    return None, "Keine Analyse-H5-Datei für diese ID."
+
+
+def _experiment_has_valid_analyze(experiment_id):
+    try:
+        analyze_scan_filename = _get_experiment_analyze_filename(experiment_id)
+        analyze_weld_filename = _get_experiment_analyze_weld_filename(experiment_id)
+    except ValueError:
+        return False
+
+    if not analyze_scan_filename or not analyze_weld_filename:
+        return False
+
+    scan_path = ANALYZING_DATA_DIR / analyze_scan_filename
+    weld_path = ANALYZING_DATA_DIR / analyze_weld_filename
+    return scan_path.is_file() and weld_path.is_file()
 
 
 def _excel_row_has_scan_metadata(row):
@@ -1187,67 +1542,99 @@ def _save_scanning_fields_to_excel(path, experiment_id, field_values, editable_c
     if editable_columns is None:
         editable_columns = SCANNING_EDITABLE_COLUMNS
 
-    workbook = load_workbook(path)
-    worksheet = workbook.active
-    header_map = _build_excel_header_map(worksheet)
-    row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
+    with _excel_workbook_lock:
+        workbook = load_workbook(path)
+        worksheet = workbook.active
+        header_map = _build_excel_header_map(worksheet)
+        row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
 
-    if row_idx is None:
-        raise ValueError("ID nicht gefunden.")
+        if row_idx is None:
+            raise ValueError("ID nicht gefunden.")
 
-    updated_fields = {}
-    for name in editable_columns:
-        if name not in field_values:
-            continue
+        updated_fields = {}
+        for name in editable_columns:
+            if name not in field_values:
+                continue
 
-        col_idx = header_map.get(name.strip().lower())
-        if col_idx is None:
-            continue
+            col_idx = header_map.get(name.strip().lower())
+            if col_idx is None:
+                continue
 
-        value = field_values[name]
-        updated_fields[name] = _write_excel_form_field(
-            worksheet,
-            row_idx,
-            col_idx,
-            name,
-            value,
-        )
+            value = field_values[name]
+            updated_fields[name] = _write_excel_form_field(
+                worksheet,
+                row_idx,
+                col_idx,
+                name,
+                value,
+            )
 
-    workbook.save(path)
-    return updated_fields
+        workbook.save(path)
+        return updated_fields
 
 
-def _mark_experiment_scanned_in_excel(path, experiment_id, scan_filename, auto_scan_duration_s=None):
-    workbook = load_workbook(path)
-    worksheet = workbook.active
-    header_map = _build_excel_header_map(worksheet)
-    row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
+def _mark_experiment_scanned_in_excel(
+    path,
+    experiment_id,
+    scan_filename,
+    scan_settings=None,
+    auto_scan_duration_s=None,
+    scanspeed=None,
+):
+    with _excel_workbook_lock:
+        workbook = load_workbook(path)
+        worksheet = workbook.active
+        header_map = _build_excel_header_map(worksheet)
+        row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
 
-    if row_idx is None:
-        raise ValueError("ID nicht gefunden.")
+        if row_idx is None:
+            raise ValueError("ID nicht gefunden.")
 
-    scanned_col = header_map.get("scanned")
-    jsonfile_col = header_map.get("jsonfile")
-    scanduration_col = header_map.get("scanduration")
-    scanned_at = datetime.now()
+        scanned_col = header_map.get("scanned")
+        jsonfile_col = header_map.get("jsonfile")
+        scanned_at = datetime.now()
 
-    if scanned_col is not None:
-        worksheet.cell(row=row_idx, column=scanned_col, value=scanned_at)
+        if scanned_col is not None:
+            worksheet.cell(row=row_idx, column=scanned_col, value=scanned_at)
 
-    if jsonfile_col is not None:
-        worksheet.cell(row=row_idx, column=jsonfile_col, value=scan_filename)
+        if jsonfile_col is not None:
+            worksheet.cell(row=row_idx, column=jsonfile_col, value=scan_filename)
 
-    updated_fields = {
-        "SCANNED": scanned_at.strftime("%Y-%m-%d %H:%M:%S"),
-        "JSONFILE": scan_filename,
-    }
+        updated_fields = {
+            "SCANNED": scanned_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "JSONFILE": scan_filename,
+        }
 
-    if scanduration_col is not None and auto_scan_duration_s is not None:
-        worksheet.cell(row=row_idx, column=scanduration_col, value=auto_scan_duration_s)
-        updated_fields["SCANDURATION"] = f"{auto_scan_duration_s:.1f}"
+        if scan_settings is not None:
+            settings_fields = _scan_settings_to_excel_fields(
+                scan_settings,
+                auto_scan_duration_s=auto_scan_duration_s,
+                scanspeed=scanspeed,
+            )
+            for name, value in settings_fields.items():
+                col_idx = header_map.get(name.strip().lower())
+                if col_idx is None:
+                    continue
+                updated_fields[name] = _write_excel_form_field(
+                    worksheet,
+                    row_idx,
+                    col_idx,
+                    name,
+                    value,
+                )
+        elif auto_scan_duration_s is not None:
+            scanduration_col = header_map.get("scanduration")
+            if scanduration_col is not None:
+                updated_fields["SCANDURATION"] = _write_excel_form_field(
+                    worksheet,
+                    row_idx,
+                    scanduration_col,
+                    "SCANDURATION",
+                    auto_scan_duration_s,
+                )
 
-    workbook.save(path)
-    return updated_fields
+        workbook.save(path)
+        return updated_fields
 
 
 def _mark_experiment_welded_in_excel(path, experiment_id, h5_filename):
@@ -1274,6 +1661,38 @@ def _mark_experiment_welded_in_excel(path, experiment_id, h5_filename):
         "WELDED": welded_at.strftime("%Y-%m-%d %H:%M:%S"),
         "H5FILE": h5_filename,
     }
+
+
+def _mark_experiment_analyzed_in_excel(
+    path,
+    experiment_id,
+    analyze_scan_filename,
+    analyze_weld_filename,
+):
+    workbook = load_workbook(path)
+    worksheet = workbook.active
+    header_map = _build_excel_header_map(worksheet)
+    row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
+
+    if row_idx is None:
+        raise ValueError("ID nicht gefunden.")
+
+    analyzescan_col = header_map.get("analyzescan")
+    analyzeweld_col = header_map.get("analyzeweld")
+
+    if analyzescan_col is not None and analyze_scan_filename is not None:
+        worksheet.cell(row=row_idx, column=analyzescan_col, value=analyze_scan_filename)
+
+    if analyzeweld_col is not None and analyze_weld_filename is not None:
+        worksheet.cell(row=row_idx, column=analyzeweld_col, value=analyze_weld_filename)
+
+    workbook.save(path)
+    updated_fields = {}
+    if analyze_scan_filename is not None:
+        updated_fields["ANALYZESCAN"] = analyze_scan_filename
+    if analyze_weld_filename is not None:
+        updated_fields["ANALYZEWELD"] = analyze_weld_filename
+    return updated_fields
 
 
 def _is_blank_excel_input(value):
@@ -1539,9 +1958,162 @@ def scanning():
         ],
         scan_settings_required_columns=SCAN_SETTINGS_COLUMNS,
         scanning_editable_columns=SCANNING_EDITABLE_COLUMNS,
+        scanning_editable_after_scan_columns=SCANNING_EDITABLE_AFTER_SCAN_COLUMNS,
+        scanspeed_field=SCANSPEED_COLUMN,
+        scan_default_exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         resolution_options=SCAN_RESOLUTION_OPTIONS,
         scan_duration_auto_seconds=SCAN_DURATION_AUTO_SECONDS,
     )
+
+
+@app.get("/analyzing")
+def analyzing():
+    table_rows = _get_analyzing_table_rows()
+
+    return render_template(
+        "analyzing.html",
+        active_page="analyzing",
+        table_rows=table_rows,
+        table_columns=ANALYZING_TABLE_COLUMNS,
+    )
+
+
+@app.post("/api/analyzing/generate/<experiment_id>")
+def generate_analyzing_data(experiment_id):
+    if versuchsuebersicht_path is None or versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
+    if row is None:
+        return jsonify(error="ID nicht gefunden."), 404
+
+    scan_path = None
+    scan_error = None
+    if _experiment_has_valid_scan(experiment_id):
+        scan_path, scan_error = _resolve_scan_path_for_experiment(experiment_id)
+
+    h5_path = None
+    h5_error = None
+    if _experiment_has_valid_weld(experiment_id):
+        h5_path, h5_error = _resolve_h5_path_for_experiment(experiment_id)
+
+    if scan_path is None and h5_path is None:
+        messages = []
+        if scan_error:
+            messages.append(scan_error)
+        if h5_error:
+            messages.append(h5_error)
+        if not messages:
+            messages.append("Für diese ID liegt keine gültige Scan- oder H5-Datei vor.")
+        return jsonify(error=" ".join(messages)), 400
+
+    try:
+        scan_speed_mm_s = None
+        scan_duration_s = None
+        if scan_path is not None:
+            scan_speed_mm_s, scan_duration_s = _get_scan_geometry_from_row(row)
+
+        result = _import_run_analyze().run_analyze(
+            experiment_id,
+            ANALYZING_DATA_DIR,
+            scan_path=scan_path,
+            weld_path=h5_path,
+            weld_config=_build_weld_config(),
+            scan_speed_mm_s=scan_speed_mm_s,
+            scan_duration_s=scan_duration_s,
+        )
+        updated_fields = _mark_experiment_analyzed_in_excel(
+            Path(versuchsuebersicht_path),
+            experiment_id,
+            result.get("json_file"),
+            result.get("h5_file"),
+        )
+        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        result["fields"] = updated_fields
+        result["has_analyze"] = _experiment_has_valid_analyze(experiment_id)
+        return jsonify(**result)
+    except Exception as exc:
+        return jsonify(error=f"Probendaten konnten nicht generiert werden: {exc}"), 500
+
+
+@app.get("/api/analyzing/<experiment_id>/graph")
+def get_analyzing_graph(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    profile_index = request.args.get("profile", default=0, type=int)
+    if profile_index is None or profile_index < 0:
+        return jsonify(error="Profilindex muss >= 0 sein."), 400
+
+    try:
+        analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
+        if error:
+            status = 404 if error.startswith("Keine Analyse-Datei") else 400
+            if error.startswith("Analyse-Datei nicht gefunden"):
+                status = 404
+            return jsonify(error=error), status
+
+        graph_data = _load_scanning_profile_graph(analyze_path, profile_index)
+        return jsonify(id=experiment_id, **graph_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der Analyse-Datei: {exc}"), 500
+
+
+@app.get("/api/analyzing/<experiment_id>/heatmap")
+def get_analyzing_heatmap(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
+        if error:
+            status = 404 if error.startswith("Keine Analyse-Datei") else 400
+            if error.startswith("Analyse-Datei nicht gefunden"):
+                status = 404
+            return jsonify(error=error), status
+
+        heatmap_data = _load_analyzing_scan_heatmap(analyze_path)
+        return jsonify(id=experiment_id, **heatmap_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der Analyse-Heatmap: {exc}"), 500
+
+
+@app.get("/api/analyzing/<experiment_id>/weld-graph")
+def get_analyzing_weld_graph(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        analyze_weld_path, error = _resolve_analyze_weld_path_for_experiment(experiment_id)
+        if error:
+            status = 404 if error.startswith("Keine Analyse-H5-Datei") else 400
+            if error.startswith("Analyse-H5-Datei nicht gefunden"):
+                status = 404
+            return jsonify(error=error), status
+
+        analyze_weld_filename = analyze_weld_path.name
+        graph_data = _load_welding_graph_from_h5(analyze_weld_path)
+        return jsonify(id=experiment_id, h5file=analyze_weld_filename, **graph_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der Analyse-H5-Datei: {exc}"), 500
 
 
 @app.post("/api/load-versuchsuebersicht")
@@ -1779,9 +2351,12 @@ def start_scanning(experiment_id):
         if existing_job and existing_job.get("status") == "running":
             return jsonify(error="Scan läuft bereits."), 409
 
+        resolved_scanspeed = _resolve_scanspeed_value(body.get("scanspeed"), row)
+
         thread = threading.Thread(
             target=_run_scan_job,
             args=(experiment_id, scan_settings, SCAN_USE_DEMO),
+            kwargs={"scanspeed": resolved_scanspeed},
             daemon=True,
         )
         thread.start()
@@ -1920,6 +2495,45 @@ def get_scanning_graph(experiment_id):
         return jsonify(error=str(exc)), 400
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der Scan-Datei: {exc}"), 500
+
+
+@app.get("/api/scanning/<experiment_id>/profile-y")
+def get_scanning_profile_y(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        scan_path, error = _resolve_scan_path_for_experiment(experiment_id)
+        if error:
+            status = 404 if error.startswith("Keine Scan-Datei") else 400
+            if error.startswith("Scan-Datei nicht gefunden"):
+                status = 404
+            return jsonify(error=error), status
+
+        document = _load_scan_document(scan_path)
+        profiles = document.get("profiles") or []
+        if not profiles:
+            return jsonify(error="Keine Profile in Scan-Datei gefunden."), 404
+
+        y_mm = _get_profile_y_mm_values(
+            document,
+            profiles,
+            experiment_id=document.get("experiment_id"),
+        )
+        return jsonify(
+            id=experiment_id,
+            profile_count=len(y_mm),
+            y_mm=y_mm,
+            y_min=min(y_mm),
+            y_max=max(y_mm),
+        )
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der Profilpositionen: {exc}"), 500
 
 
 @app.get("/api/scanning/<experiment_id>/live-profile")
