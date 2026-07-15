@@ -2,10 +2,9 @@ from pathlib import Path
 import json
 import os
 import re
-import subprocess
+import shutil
 import sys
 import threading
-import time
 from datetime import datetime
 
 import h5py
@@ -79,13 +78,14 @@ PATH_IMAGES_DIR = TEMPLATES_DIR / "path_images"
 WELDING_DATA_DIR = BASE_DIR / "data" / "welding"
 SCANNING_DATA_DIR = BASE_DIR / "data" / "scanning"
 ANALYZING_DATA_DIR = BASE_DIR / "data" / "analyzing"
-SCAN_SCRIPT_PATH = BASE_DIR / "scripts" / "run_scan.py"
-WELD_SCRIPT_PATH = BASE_DIR / "scripts" / "run_weld.py"
 WELDING_METADATA_COLUMNS = ["H5FILE"]
 SCANNING_METADATA_COLUMNS = ["JSONFILE"]
-ANALYZING_METADATA_COLUMNS = ["ANALYZESCAN", "ANALYZEWELD"]
+ANALYZING_METADATA_COLUMNS = ["ANALYZEFOLDER"]
+ANALYZE_SCAN_FILENAME = "cropped_scan.json"
+ANALYZE_WELD_FILENAME = "cropped_weld.h5"
+ANALYZE_X_PROFILE_FILENAME = "X_profile.json"
+ANALYZE_Y_PROFILE_FILENAME = "Y_profile.json"
 SCAN_SETTINGS_COLUMNS = ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION"]
-SCANNING_PRESCAN_EXCEL_COLUMNS = SCAN_SETTINGS_COLUMNS
 SCAN_DEFAULT_EXPOSURE_US = 100
 SCAN_RESOLUTION_OPTIONS = [160, 320, 640, 1280]
 SCAN_DURATION_AUTO_SECONDS = 1.0
@@ -255,7 +255,7 @@ def _scan_settings_dict_from_values(
     profile_frequency,
     exposure_us,
     scan_duration_s,
-    scan_duration_auto=False,
+    scan_duration_auto=True,
 ):
     run_scan = _import_run_scan()
     settings = run_scan.ScanSettings.from_profile_frequency(
@@ -296,6 +296,7 @@ def _get_scan_settings_from_row(row):
         profile_frequency=profile_frequency,
         exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         scan_duration_s=scan_duration_s,
+        scan_duration_auto=True,
     )
 
 
@@ -305,6 +306,7 @@ def _default_scan_settings():
         profile_frequency=10.0,
         exposure_us=SCAN_DEFAULT_EXPOSURE_US,
         scan_duration_s=1.0,
+        scan_duration_auto=True,
     )
 
 
@@ -402,7 +404,7 @@ def _get_profile_y_mm_values(document, profiles, experiment_id=None):
                 pass
 
     if scan_speed_mm_s is None or scan_duration_s is None:
-        raise ValueError("SCANSPEED oder SCANDURATION fehlen für y-Zuordnung.")
+        raise ValueError(f"{SCANSPEED_COLUMN} oder SCANDURATION fehlen für y-Zuordnung.")
 
     temp_profiles = [{"profile_index": index} for index in range(len(profiles))]
     run_scan.assign_profile_y_mm(
@@ -417,7 +419,9 @@ def _get_scan_settings_from_ui(payload):
     if not isinstance(payload, dict):
         raise ValueError("Ungültige Scan-Einstellungen.")
 
-    scan_duration_auto = _parse_bool_setting(payload.get("scan_duration_auto"))
+    scan_duration_auto = _parse_bool_setting(
+        payload.get("scan_duration_auto", True),
+    )
     if scan_duration_auto:
         scan_duration_s = SCAN_DURATION_AUTO_SECONDS
     else:
@@ -533,11 +537,7 @@ def _build_profile_graph_payload(
     scanning=False,
 ):
     point_stats = _profile_point_stats(profile)
-    x_mm, z_mm = _filter_valid_profile_points(
-        profile["x_mm"],
-        profile["z_mm"],
-        profile.get("intensities"),
-    )
+    x_mm, z_mm = _filter_valid_profile_points(profile)
     x_mm, z_mm = _downsample_profile_points(
         x_mm,
         z_mm,
@@ -613,7 +613,7 @@ def _run_weld_job(experiment_id, use_demo=False):
             normalized_id,
             result["h5_file"],
         )
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        _refresh_versuchs_row_cache(normalized_id, updated_fields)
         result.pop("success", None)
         _set_weld_job(
             normalized_id,
@@ -689,15 +689,7 @@ def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
         row = versuchsuebersicht_data["id_index"].get(normalized_id) if versuchsuebersicht_data else None
         resolved_scanspeed = _resolve_scanspeed_value(scanspeed, row)
         if versuchsuebersicht_path is not None:
-            excel_path = Path(versuchsuebersicht_path)
             _repair_orphaned_scan_metadata(normalized_id)
-            _save_scanning_fields_to_excel(
-                excel_path,
-                normalized_id,
-                _scan_settings_to_excel_fields(scan_settings, scanspeed=resolved_scanspeed),
-                editable_columns=SCANNING_PRESCAN_EXCEL_COLUMNS,
-            )
-            _load_versuchsuebersicht_from_path(excel_path)
 
         run_scan = _import_run_scan()
         run_scan.close_live_profile_preview()
@@ -719,7 +711,7 @@ def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
             auto_scan_duration_s=auto_scan_duration_s,
             scanspeed=resolved_scanspeed,
         )
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        _refresh_versuchs_row_cache(normalized_id, updated_fields)
         result.pop("success", None)
         _set_scan_job(
             normalized_id,
@@ -782,6 +774,47 @@ def _load_versuchsuebersicht_from_path(path):
         "row_count": len(records),
         "column_count": len(columns),
     }
+
+
+def _cache_value_from_excel_field(field_name, value):
+    if _is_blank_excel_input(value):
+        return None
+
+    if field_name in {"SCANNED", "WELDED"}:
+        parsed = _parse_excel_timestamp(value)
+        return parsed if parsed is not None else value
+
+    return _excel_cell_value(field_name, value)
+
+
+def _sync_versuchs_row_cache(experiment_id, updated_fields):
+    if versuchsuebersicht_data is None or not updated_fields:
+        return False
+
+    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
+    if row is None:
+        return False
+
+    columns = versuchsuebersicht_data["columns"]
+    for field_name, value in updated_fields.items():
+        if field_name == "deleted_file":
+            continue
+
+        column = _find_column(columns, field_name)
+        if column is None:
+            continue
+
+        row[column] = _cache_value_from_excel_field(field_name, value)
+
+    return True
+
+
+def _refresh_versuchs_row_cache(experiment_id, updated_fields):
+    if _sync_versuchs_row_cache(experiment_id, updated_fields):
+        return
+
+    if versuchsuebersicht_path:
+        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
 
 
 def _try_load_default_versuchsuebersicht():
@@ -1119,19 +1152,8 @@ def _load_scan_document(scan_path):
     return document
 
 
-def _profile_valid_point_mask(profile):
-    x_mm = np.asarray(profile["x_mm"], dtype=float)
-    z_mm = np.asarray(profile["z_mm"], dtype=float)
-    intensities = profile.get("intensities")
-
-    if intensities is not None:
-        return np.asarray(intensities, dtype=float) > 0
-
-    return (np.abs(x_mm) > 1e-6) | (np.abs(z_mm) > 1e-6)
-
-
 def _profile_point_stats(profile):
-    valid_mask = _profile_valid_point_mask(profile)
+    valid_mask = _import_run_scan()._profile_measurement_mask(profile)
     total_points = int(valid_mask.size)
     valid_points = int(valid_mask.sum())
     return {
@@ -1141,15 +1163,10 @@ def _profile_point_stats(profile):
     }
 
 
-def _filter_valid_profile_points(x_mm, z_mm, intensities=None):
-    x_mm = np.asarray(x_mm, dtype=float)
-    z_mm = np.asarray(z_mm, dtype=float)
-
-    if intensities is not None:
-        intensities = np.asarray(intensities, dtype=float)
-        mask = intensities > 0
-    else:
-        mask = (np.abs(x_mm) > 1e-6) | (np.abs(z_mm) > 1e-6)
+def _filter_valid_profile_points(profile):
+    x_mm = np.asarray(profile["x_mm"], dtype=float)
+    z_mm = np.asarray(profile["z_mm"], dtype=float)
+    mask = _import_run_scan()._profile_measurement_mask(profile)
 
     if not np.any(mask):
         return x_mm[:0], z_mm[:0]
@@ -1188,11 +1205,7 @@ def _load_scanning_profile_graph(scan_path, profile_index):
             )[profile_index]
         except ValueError:
             y_mm = None
-    x_mm, z_mm = _filter_valid_profile_points(
-        profile["x_mm"],
-        profile["z_mm"],
-        profile.get("intensities"),
-    )
+    x_mm, z_mm = _filter_valid_profile_points(profile)
     x_mm, z_mm = _downsample_profile_points(
         x_mm,
         z_mm,
@@ -1288,19 +1301,22 @@ def _resolve_scan_path_for_experiment(experiment_id):
     return scan_path, None
 
 
-def _sanitize_analyze_filename(filename):
-    text = str(filename).strip()
+def _sanitize_analyze_folder_name(folder_name):
+    text = str(folder_name).strip()
     if not text:
         return None
 
     name = Path(text).name
-    if not re.fullmatch(r"[\w.-]+\.json", name, re.IGNORECASE):
-        raise ValueError(f"Ungültiger Analyse-Dateiname: {name}")
+    if name != text or name in {".", ".."}:
+        raise ValueError(f"Ungültiger Analyse-Ordnername: {text}")
+
+    if not re.fullmatch(r"[A-Z]{3}_\d{8}_\d{6}", name):
+        raise ValueError(f"Ungültiger Analyse-Ordnername: {name}")
 
     return name
 
 
-def _get_experiment_analyze_filename(experiment_id):
+def _get_experiment_analyze_folder(experiment_id):
     if versuchsuebersicht_data is None:
         return None
 
@@ -1308,7 +1324,7 @@ def _get_experiment_analyze_filename(experiment_id):
     if row is None:
         return None
 
-    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZESCAN")
+    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZEFOLDER")
     if column is None:
         return None
 
@@ -1316,91 +1332,81 @@ def _get_experiment_analyze_filename(experiment_id):
     if not value:
         return None
 
-    return _sanitize_analyze_filename(value)
+    return _sanitize_analyze_folder_name(value)
+
+
+def _resolve_analyze_folder_for_experiment(experiment_id):
+    try:
+        analyze_folder = _get_experiment_analyze_folder(experiment_id)
+    except ValueError as exc:
+        return None, str(exc)
+
+    if not analyze_folder:
+        return None, "Kein Analyse-Ordner für diese ID."
+
+    folder_path = ANALYZING_DATA_DIR / analyze_folder
+    if not folder_path.is_dir():
+        return None, f"Analyse-Ordner nicht gefunden: {analyze_folder}"
+
+    return folder_path, None
 
 
 def _resolve_analyze_path_for_experiment(experiment_id):
-    try:
-        analyze_filename = _get_experiment_analyze_filename(experiment_id)
-    except ValueError as exc:
-        return None, str(exc)
+    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
+    if error:
+        return None, error
 
-    normalized_id = _normalize_id(experiment_id)
-    candidates = []
-    if analyze_filename:
-        candidates.append(analyze_filename)
-    default_filename = f"{normalized_id}.json"
-    if default_filename not in candidates:
-        candidates.append(default_filename)
+    analyze_path = folder_path / ANALYZE_SCAN_FILENAME
+    if not analyze_path.is_file():
+        return None, f"{ANALYZE_SCAN_FILENAME} nicht gefunden in {folder_path.name}."
 
-    for filename in candidates:
-        analyze_path = ANALYZING_DATA_DIR / filename
-        if analyze_path.is_file():
-            return analyze_path, None
-
-    if analyze_filename:
-        return None, f"Analyse-Datei nicht gefunden: {analyze_filename}"
-
-    return None, "Keine Analyse-Datei für diese ID."
-
-
-def _get_experiment_analyze_weld_filename(experiment_id):
-    if versuchsuebersicht_data is None:
-        return None
-
-    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
-    if row is None:
-        return None
-
-    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZEWELD")
-    if column is None:
-        return None
-
-    value = _format_cell_value(row.get(column))
-    if not value:
-        return None
-
-    return _sanitize_h5_filename(value)
+    return analyze_path, None
 
 
 def _resolve_analyze_weld_path_for_experiment(experiment_id):
-    try:
-        analyze_weld_filename = _get_experiment_analyze_weld_filename(experiment_id)
-    except ValueError as exc:
-        return None, str(exc)
+    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
+    if error:
+        return None, error
 
-    normalized_id = _normalize_id(experiment_id)
-    candidates = []
-    if analyze_weld_filename:
-        candidates.append(analyze_weld_filename)
-    default_filename = f"{normalized_id}.h5"
-    if default_filename not in candidates:
-        candidates.append(default_filename)
+    analyze_weld_path = folder_path / ANALYZE_WELD_FILENAME
+    if not analyze_weld_path.is_file():
+        return None, f"{ANALYZE_WELD_FILENAME} nicht gefunden in {folder_path.name}."
 
-    for filename in candidates:
-        analyze_weld_path = ANALYZING_DATA_DIR / filename
-        if analyze_weld_path.is_file():
-            return analyze_weld_path, None
+    return analyze_weld_path, None
 
-    if analyze_weld_filename:
-        return None, f"Analyse-H5-Datei nicht gefunden: {analyze_weld_filename}"
 
-    return None, "Keine Analyse-H5-Datei für diese ID."
+def _resolve_analyze_profile_path_for_experiment(experiment_id, filename):
+    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
+    if error:
+        return None, error
+
+    profile_path = folder_path / filename
+    if not profile_path.is_file():
+        return None, f"{filename} nicht gefunden in {folder_path.name}."
+
+    return profile_path, None
+
+
+def _load_analyze_profile_graph(profile_path):
+    with profile_path.open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+
+    if not isinstance(document, dict):
+        raise ValueError("Ungültiges Profil-JSON.")
+
+    return document
 
 
 def _experiment_has_valid_analyze(experiment_id):
     try:
-        analyze_scan_filename = _get_experiment_analyze_filename(experiment_id)
-        analyze_weld_filename = _get_experiment_analyze_weld_filename(experiment_id)
+        analyze_folder = _get_experiment_analyze_folder(experiment_id)
     except ValueError:
         return False
 
-    if not analyze_scan_filename or not analyze_weld_filename:
+    if not analyze_folder:
         return False
 
-    scan_path = ANALYZING_DATA_DIR / analyze_scan_filename
-    weld_path = ANALYZING_DATA_DIR / analyze_weld_filename
-    return scan_path.is_file() and weld_path.is_file()
+    return (ANALYZING_DATA_DIR / analyze_folder).is_dir()
 
 
 def _excel_row_has_scan_metadata(row):
@@ -1432,7 +1438,9 @@ def _repair_orphaned_scan_metadata(experiment_id):
     if not _excel_row_has_scan_metadata(row):
         return None
 
-    return _reset_experiment_scan_in_excel(Path(versuchsuebersicht_path), experiment_id)
+    repaired_fields = _reset_experiment_scan_in_excel(Path(versuchsuebersicht_path), experiment_id)
+    _refresh_versuchs_row_cache(experiment_id, repaired_fields)
+    return repaired_fields
 
 
 def _apply_scan_display_fields(fields, experiment_id):
@@ -1663,12 +1671,7 @@ def _mark_experiment_welded_in_excel(path, experiment_id, h5_filename):
     }
 
 
-def _mark_experiment_analyzed_in_excel(
-    path,
-    experiment_id,
-    analyze_scan_filename,
-    analyze_weld_filename,
-):
+def _mark_experiment_analyzed_in_excel(path, experiment_id, analyze_folder):
     workbook = load_workbook(path)
     worksheet = workbook.active
     header_map = _build_excel_header_map(worksheet)
@@ -1677,21 +1680,15 @@ def _mark_experiment_analyzed_in_excel(
     if row_idx is None:
         raise ValueError("ID nicht gefunden.")
 
-    analyzescan_col = header_map.get("analyzescan")
-    analyzeweld_col = header_map.get("analyzeweld")
+    analyzefolder_col = header_map.get("analyzefolder")
 
-    if analyzescan_col is not None and analyze_scan_filename is not None:
-        worksheet.cell(row=row_idx, column=analyzescan_col, value=analyze_scan_filename)
-
-    if analyzeweld_col is not None and analyze_weld_filename is not None:
-        worksheet.cell(row=row_idx, column=analyzeweld_col, value=analyze_weld_filename)
+    if analyzefolder_col is not None and analyze_folder is not None:
+        worksheet.cell(row=row_idx, column=analyzefolder_col, value=analyze_folder)
 
     workbook.save(path)
     updated_fields = {}
-    if analyze_scan_filename is not None:
-        updated_fields["ANALYZESCAN"] = analyze_scan_filename
-    if analyze_weld_filename is not None:
-        updated_fields["ANALYZEWELD"] = analyze_weld_filename
+    if analyze_folder is not None:
+        updated_fields["ANALYZEFOLDER"] = analyze_folder
     return updated_fields
 
 
@@ -1734,6 +1731,32 @@ def _clear_excel_cell(worksheet, row_idx, col_idx):
     worksheet.cell(row=row_idx, column=col_idx, value="")
 
 
+def _delete_analyze_folder(folder_name):
+    if not folder_name:
+        return None
+
+    safe_folder = _sanitize_analyze_folder_name(folder_name)
+    if not safe_folder:
+        return None
+
+    folder_path = (ANALYZING_DATA_DIR / safe_folder).resolve()
+    analyzing_root = ANALYZING_DATA_DIR.resolve()
+    if analyzing_root not in folder_path.parents or not folder_path.is_dir():
+        return None
+
+    shutil.rmtree(folder_path)
+    return safe_folder
+
+
+def _delete_existing_analyze_folder(experiment_id):
+    try:
+        analyze_folder = _get_experiment_analyze_folder(experiment_id)
+    except ValueError:
+        return None
+
+    return _delete_analyze_folder(analyze_folder)
+
+
 def _reset_experiment_scan_in_excel(path, experiment_id):
     workbook = load_workbook(path)
     worksheet = workbook.active
@@ -1745,7 +1768,19 @@ def _reset_experiment_scan_in_excel(path, experiment_id):
 
     scanned_col = header_map.get("scanned")
     jsonfile_col = header_map.get("jsonfile")
+    analyzefolder_col = header_map.get("analyzefolder")
     deleted_file = None
+    deleted_analyze_folder = None
+
+    if analyzefolder_col is not None:
+        analyze_folder = worksheet.cell(row=row_idx, column=analyzefolder_col).value
+        if _has_value(analyze_folder):
+            try:
+                deleted_analyze_folder = _delete_analyze_folder(analyze_folder)
+            except ValueError:
+                deleted_analyze_folder = None
+
+        _clear_excel_cell(worksheet, row_idx, analyzefolder_col)
 
     if jsonfile_col is not None:
         scan_filename = worksheet.cell(row=row_idx, column=jsonfile_col).value
@@ -1768,7 +1803,9 @@ def _reset_experiment_scan_in_excel(path, experiment_id):
     return {
         "SCANNED": "",
         "JSONFILE": "",
+        "ANALYZEFOLDER": "",
         "deleted_file": deleted_file,
+        "deleted_analyze_folder": deleted_analyze_folder,
     }
 
 
@@ -1840,61 +1877,6 @@ def _reset_experiment_weld_in_excel(path, experiment_id):
         "H5FILE": "",
         "deleted_file": deleted_file,
     }
-
-
-def _run_scan_script(experiment_id, use_demo=False, scan_settings=None):
-    if not SCAN_SCRIPT_PATH.is_file():
-        raise RuntimeError(f"Scan-Skript nicht gefunden: {SCAN_SCRIPT_PATH}")
-
-    SCANNING_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    command = [
-        sys.executable,
-        str(SCAN_SCRIPT_PATH),
-        "--experiment-id",
-        experiment_id,
-        "--output-dir",
-        str(SCANNING_DATA_DIR),
-    ]
-    if use_demo:
-        command.append("--demo")
-    if SCANNER_IP:
-        command.extend(["--scanner-ip", SCANNER_IP])
-    if scan_settings:
-        command.extend(
-            [
-                "--resolution",
-                str(scan_settings["resolution"]),
-                "--profile-frequency",
-                str(scan_settings["profile_frequency"]),
-                "--exposure-us",
-                str(scan_settings["exposure_us"]),
-                "--scan-duration-s",
-                str(scan_settings["scan_duration_s"]),
-            ]
-        )
-        if scan_settings.get("scan_duration_auto"):
-            command.append("--scan-duration-auto")
-
-    scan_timeout_s = 600 if scan_settings and scan_settings.get("scan_duration_auto") else 180
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=scan_timeout_s,
-        cwd=str(BASE_DIR),
-        check=False,
-    )
-
-    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    if not output_lines:
-        stderr = completed.stderr.strip()
-        raise RuntimeError(stderr or "Scan-Skript ohne Ausgabe beendet.")
-
-    payload = json.loads(output_lines[-1])
-    if completed.returncode != 0 or not payload.get("success"):
-        raise RuntimeError(payload.get("error") or completed.stderr.strip() or "Scan fehlgeschlagen.")
-
-    return payload
 
 
 @app.context_processor
@@ -2016,6 +1998,8 @@ def generate_analyzing_data(experiment_id):
         if scan_path is not None:
             scan_speed_mm_s, scan_duration_s = _get_scan_geometry_from_row(row)
 
+        deleted_analyze_folder = _delete_existing_analyze_folder(experiment_id)
+
         result = _import_run_analyze().run_analyze(
             experiment_id,
             ANALYZING_DATA_DIR,
@@ -2028,12 +2012,13 @@ def generate_analyzing_data(experiment_id):
         updated_fields = _mark_experiment_analyzed_in_excel(
             Path(versuchsuebersicht_path),
             experiment_id,
-            result.get("json_file"),
-            result.get("h5_file"),
+            result.get("analyze_folder"),
         )
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        _refresh_versuchs_row_cache(experiment_id, updated_fields)
         result["fields"] = updated_fields
         result["has_analyze"] = _experiment_has_valid_analyze(experiment_id)
+        if deleted_analyze_folder:
+            result["deleted_analyze_folder"] = deleted_analyze_folder
         return jsonify(**result)
     except Exception as exc:
         return jsonify(error=f"Probendaten konnten nicht generiert werden: {exc}"), 500
@@ -2054,9 +2039,10 @@ def get_analyzing_graph(experiment_id):
     try:
         analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
         if error:
-            status = 404 if error.startswith("Keine Analyse-Datei") else 400
-            if error.startswith("Analyse-Datei nicht gefunden"):
-                status = 404
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith("cropped_scan.json nicht gefunden")
+            ) else 400
             return jsonify(error=error), status
 
         graph_data = _load_scanning_profile_graph(analyze_path, profile_index)
@@ -2078,9 +2064,10 @@ def get_analyzing_heatmap(experiment_id):
     try:
         analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
         if error:
-            status = 404 if error.startswith("Keine Analyse-Datei") else 400
-            if error.startswith("Analyse-Datei nicht gefunden"):
-                status = 404
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith("cropped_scan.json nicht gefunden")
+            ) else 400
             return jsonify(error=error), status
 
         heatmap_data = _load_analyzing_scan_heatmap(analyze_path)
@@ -2089,6 +2076,62 @@ def get_analyzing_heatmap(experiment_id):
         return jsonify(error=str(exc)), 400
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der Analyse-Heatmap: {exc}"), 500
+
+
+@app.get("/api/analyzing/<experiment_id>/x-profile")
+def get_analyzing_x_profile(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        profile_path, error = _resolve_analyze_profile_path_for_experiment(
+            experiment_id,
+            ANALYZE_X_PROFILE_FILENAME,
+        )
+        if error:
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith(f"{ANALYZE_X_PROFILE_FILENAME} nicht gefunden")
+            ) else 400
+            return jsonify(error=error), status
+
+        graph_data = _load_analyze_profile_graph(profile_path)
+        return jsonify(id=experiment_id, **graph_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_X_PROFILE_FILENAME}: {exc}"), 500
+
+
+@app.get("/api/analyzing/<experiment_id>/y-profile")
+def get_analyzing_y_profile(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        profile_path, error = _resolve_analyze_profile_path_for_experiment(
+            experiment_id,
+            ANALYZE_Y_PROFILE_FILENAME,
+        )
+        if error:
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith(f"{ANALYZE_Y_PROFILE_FILENAME} nicht gefunden")
+            ) else 400
+            return jsonify(error=error), status
+
+        graph_data = _load_analyze_profile_graph(profile_path)
+        return jsonify(id=experiment_id, **graph_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_Y_PROFILE_FILENAME}: {exc}"), 500
 
 
 @app.get("/api/analyzing/<experiment_id>/weld-graph")
@@ -2102,8 +2145,8 @@ def get_analyzing_weld_graph(experiment_id):
     try:
         analyze_weld_path, error = _resolve_analyze_weld_path_for_experiment(experiment_id)
         if error:
-            status = 404 if error.startswith("Keine Analyse-H5-Datei") else 400
-            if error.startswith("Analyse-H5-Datei nicht gefunden"):
+            status = 404 if error.startswith("Kein Analyse-Ordner") else 400
+            if error.startswith("cropped_weld.h5 nicht gefunden"):
                 status = 404
             return jsonify(error=error), status
 
@@ -2199,7 +2242,7 @@ def reset_welding(experiment_id):
             Path(versuchsuebersicht_path),
             experiment_id,
         )
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        _refresh_versuchs_row_cache(experiment_id, updated_fields)
         return jsonify(
             success=True,
             id=experiment_id,
@@ -2424,7 +2467,7 @@ def reset_scanning(experiment_id):
             Path(versuchsuebersicht_path),
             experiment_id,
         )
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        _refresh_versuchs_row_cache(experiment_id, updated_fields)
         return jsonify(
             success=True,
             id=experiment_id,
@@ -2432,8 +2475,10 @@ def reset_scanning(experiment_id):
             fields={
                 "SCANNED": updated_fields["SCANNED"],
                 "JSONFILE": updated_fields["JSONFILE"],
+                "ANALYZEFOLDER": updated_fields.get("ANALYZEFOLDER", ""),
             },
             deleted_file=updated_fields.get("deleted_file"),
+            deleted_analyze_folder=updated_fields.get("deleted_analyze_folder"),
         )
     except Exception as exc:
         return jsonify(error=f"Scan konnte nicht zurückgesetzt werden: {exc}"), 500
@@ -2456,9 +2501,6 @@ def get_scanning_data(experiment_id):
     )
 
     repaired_fields = _repair_orphaned_scan_metadata(experiment_id)
-    if repaired_fields is not None:
-        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
-        row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
 
     fields = _apply_scan_display_fields(
         _get_experiment_fields(row, field_names),
@@ -2632,7 +2674,7 @@ def save_welding_data(experiment_id):
         _validate_welding_field_values(field_values)
         path = Path(versuchsuebersicht_path)
         updated_fields = _save_welding_fields_to_excel(path, experiment_id, field_values)
-        _load_versuchsuebersicht_from_path(path)
+        _refresh_versuchs_row_cache(experiment_id, updated_fields)
         return jsonify(success=True, id=experiment_id, fields=updated_fields)
     except Exception as exc:
         return jsonify(error=f"Fehler beim Speichern: {exc}"), 500
@@ -2664,7 +2706,7 @@ def save_scanning_data(experiment_id):
             field_values,
             editable_columns=editable_columns,
         )
-        _load_versuchsuebersicht_from_path(path)
+        _refresh_versuchs_row_cache(experiment_id, updated_fields)
         is_scanned = _experiment_has_valid_scan(experiment_id)
         return jsonify(
             success=True,

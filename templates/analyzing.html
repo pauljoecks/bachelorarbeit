@@ -137,6 +137,14 @@
           <span id="analyzing-heatmap-scale-max">–</span>
         </div>
       </div>
+
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-x-profile-canvas"></canvas>
+      </div>
+
+      <div class="analyzing-graph-wrap">
+        <canvas id="analyzing-y-profile-canvas"></canvas>
+      </div>
     </div>
 
     <div id="analyzing-weld-view" class="analyzing-view-panel" hidden>
@@ -172,16 +180,18 @@
       },
       label(context) {
         const name = context.dataset.label || "";
+        const xValue = formatTooltipNumber(context.parsed.x);
         const yValue = formatTooltipNumber(context.parsed.y);
-        return yValue ? `${name}: ${yValue}` : name;
-      },
-      afterBody(tooltipItems) {
-        if (!tooltipItems.length) {
-          return [];
+        if (!yValue) {
+          return name;
         }
 
-        const xValue = formatTooltipNumber(tooltipItems[0].parsed.x);
-        return xValue ? [`${xLabel}: ${xValue}`] : [];
+        const parts = [];
+        if (xValue) {
+          parts.push(`${xLabel}: ${xValue}`);
+        }
+        parts.push(name ? `${name}: ${yValue}` : yValue);
+        return parts.join(", ");
       },
     };
   }
@@ -550,14 +560,17 @@
     const profileValue = document.getElementById("analyzing-profile-value");
     const analyzingCanvas = document.getElementById("analyzing-graph-canvas");
     const scanningCanvas = document.getElementById("analyzing-scan-graph-canvas");
+    const xProfileCanvas = document.getElementById("analyzing-x-profile-canvas");
+    const yProfileCanvas = document.getElementById("analyzing-y-profile-canvas");
     const heatmapCanvas = document.getElementById("analyzing-heatmap-canvas");
     const HEATMAP_AXIS_MARGIN = { top: 12, bottom: 36 };
     let analyzingChart = null;
     let scanningChart = null;
+    let xProfileChart = null;
+    let yProfileChart = null;
     let heatmapData = null;
     let heatmapProfileIndex = 0;
     let isLoadingGraphs = false;
-    let currentProfileCount = 0;
     let profileYValues = [];
 
     function destroyChart(chart) {
@@ -582,13 +595,13 @@
         return;
       }
 
-      currentProfileCount = Math.max(profileCount, 0);
-      const maxIndex = Math.max(currentProfileCount - 1, 0);
+      const normalizedCount = Math.max(profileCount, 0);
+      const maxIndex = Math.max(normalizedCount - 1, 0);
       const activeIndex = Math.min(profileIndex, maxIndex);
       profileSlider.min = "0";
       profileSlider.max = String(maxIndex);
       profileSlider.value = String(activeIndex);
-      profileSlider.disabled = currentProfileCount <= 1;
+      profileSlider.disabled = normalizedCount <= 1;
       profileValue.textContent = formatProfileSliderLabel(activeIndex, maxIndex, activeYMm);
     }
 
@@ -598,22 +611,14 @@
         return;
       }
 
-      const endpoints = [
-        `/api/analyzing/${encodeURIComponent(id)}/heatmap`,
-        `/api/scanning/${encodeURIComponent(id)}/profile-y`,
-      ];
-
-      for (const endpoint of endpoints) {
-        try {
-          const response = await fetch(endpoint);
-          const data = await response.json();
-          if (response.ok && Array.isArray(data.y_mm) && data.y_mm.length > 0) {
-            profileYValues = data.y_mm;
-            return;
-          }
-        } catch {
-          // try next source
+      try {
+        const response = await fetch(`/api/scanning/${encodeURIComponent(id)}/profile-y`);
+        const data = await response.json();
+        if (response.ok && Array.isArray(data.y_mm) && data.y_mm.length > 0) {
+          profileYValues = data.y_mm;
         }
+      } catch {
+        // keep empty fallback
       }
     }
 
@@ -641,6 +646,7 @@
           x: Number.parseFloat(xValue),
           y: Number.parseFloat(data.z_mm[index]),
         }))
+        .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
         .sort((left, right) => left.x - right.x);
 
       return new Chart(canvas, {
@@ -678,12 +684,15 @@
               display: false,
             },
             tooltip: {
+              mode: "nearest",
+              intersect: false,
               callbacks: buildPrimaryYTooltipCallbacks("x [mm]"),
             },
           },
           scales: {
             x: {
               type: "linear",
+              reverse: options.reverseX ?? false,
               min: options.xAxisRange?.min,
               max: options.xAxisRange?.max,
               title: {
@@ -721,16 +730,125 @@
       });
     }
 
+    function renderAxisProfileChart(canvas, existingChart, data, options) {
+      if (!canvas || typeof Chart === "undefined") {
+        return existingChart;
+      }
+
+      destroyChart(existingChart);
+
+      const xField = options.xField ?? "x_mm";
+      const zField = options.zField ?? "z_mm";
+      const xValues = Array.isArray(data?.[xField]) ? data[xField] : [];
+      const zValues = Array.isArray(data?.[zField]) ? data[zField] : [];
+
+      const points = xValues
+        .map((xValue, index) => ({
+          x: Number.parseFloat(xValue),
+          y: Number.parseFloat(zValues[index]),
+        }))
+        .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+        .sort((left, right) => left.x - right.x);
+
+      return new Chart(canvas, {
+        type: "line",
+        data: {
+          datasets: [
+            {
+              label: options.label ?? "Median z [mm]",
+              data: points,
+              borderColor: options.color,
+              backgroundColor: options.backgroundColor,
+              borderWidth: 1.5,
+              pointRadius: 0,
+              pointHitRadius: 12,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          parsing: false,
+          animation: false,
+          interaction: {
+            mode: "nearest",
+            axis: "x",
+            intersect: false,
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#f8fafc",
+              },
+            },
+            title: {
+              display: Boolean(options.title),
+              text: options.title ?? "",
+              color: "#94a3b8",
+              font: {
+                size: 13,
+              },
+            },
+            tooltip: {
+              mode: "nearest",
+              intersect: false,
+              callbacks: buildPrimaryYTooltipCallbacks(options.xLabel ?? "x [mm]"),
+            },
+          },
+          scales: {
+            x: {
+              type: "linear",
+              reverse: options.reverseX ?? false,
+              min: options.xAxisRange?.min,
+              max: options.xAxisRange?.max,
+              title: {
+                display: true,
+                text: options.xLabel ?? "x [mm]",
+                color: "#94a3b8",
+              },
+              ticks: {
+                color: "#94a3b8",
+                maxTicksLimit: 8,
+              },
+              grid: {
+                color: "#334155",
+              },
+            },
+            y: {
+              type: "linear",
+              afterFit(axis) {
+                axis.width = 52;
+              },
+              title: {
+                display: true,
+                text: "z [mm]",
+                color: options.color,
+              },
+              ticks: {
+                color: options.color,
+              },
+              grid: {
+                color: "#334155",
+              },
+            },
+          },
+        },
+      });
+    }
+
+    const HEATMAP_ZERO_COLOR = [4, 6, 11];
+    const HEATMAP_MIN_COLOR = [15, 23, 42];
+
     function zToHeatmapColor(zValue, zScaleMin, zScaleMax) {
       if (zValue <= 0 || zScaleMax <= zScaleMin) {
-        return [15, 23, 42];
+        return HEATMAP_ZERO_COLOR;
       }
 
       const t = Math.min(1, Math.max(0, (zValue - zScaleMin) / (zScaleMax - zScaleMin)));
       return [
-        Math.round(15 + (167 - 15) * t),
-        Math.round(23 + (139 - 23) * t),
-        Math.round(42 + (250 - 42) * t),
+        Math.round(HEATMAP_MIN_COLOR[0] + (167 - HEATMAP_MIN_COLOR[0]) * t),
+        Math.round(HEATMAP_MIN_COLOR[1] + (139 - HEATMAP_MIN_COLOR[1]) * t),
+        Math.round(HEATMAP_MIN_COLOR[2] + (250 - HEATMAP_MIN_COLOR[2]) * t),
       ];
     }
 
@@ -1069,8 +1187,12 @@
     function clearGraphs() {
       destroyChart(analyzingChart);
       destroyChart(scanningChart);
+      destroyChart(xProfileChart);
+      destroyChart(yProfileChart);
       analyzingChart = null;
       scanningChart = null;
+      xProfileChart = null;
+      yProfileChart = null;
       profileYValues = [];
       clearHeatmap();
       updateProfileSlider(0, 0);
@@ -1096,10 +1218,18 @@
       isLoadingGraphs = true;
 
       try {
-        const [analyzeResult, scanResult, heatmapResult] = await Promise.all([
+        const [analyzeResult, scanResult, heatmapResult, xProfileResult, yProfileResult] = await Promise.all([
           fetchProfileGraph("/api/analyzing", id, profileIndex),
           fetchProfileGraph("/api/scanning", id, profileIndex),
           fetch(`/api/analyzing/${encodeURIComponent(id)}/heatmap`).then(async (response) => ({
+            response,
+            data: await response.json(),
+          })),
+          fetch(`/api/analyzing/${encodeURIComponent(id)}/x-profile`).then(async (response) => ({
+            response,
+            data: await response.json(),
+          })),
+          fetch(`/api/analyzing/${encodeURIComponent(id)}/y-profile`).then(async (response) => ({
             response,
             data: await response.json(),
           })),
@@ -1137,6 +1267,36 @@
           });
         }
 
+        if (!xProfileResult.response.ok) {
+          destroyChart(xProfileChart);
+          xProfileChart = null;
+        } else {
+          xProfileChart = renderAxisProfileChart(xProfileCanvas, xProfileChart, xProfileResult.data, {
+            color: "#f59e0b",
+            backgroundColor: "#f59e0b33",
+            xField: "x_mm",
+            xLabel: "x [mm]",
+            xAxisRange,
+            title: "X_profile",
+            label: "Median z [mm]",
+          });
+        }
+
+        if (!yProfileResult.response.ok) {
+          destroyChart(yProfileChart);
+          yProfileChart = null;
+        } else {
+          yProfileChart = renderAxisProfileChart(yProfileCanvas, yProfileChart, yProfileResult.data, {
+            color: "#34d399",
+            backgroundColor: "#34d39933",
+            xField: "y_mm",
+            xLabel: "y [mm]",
+            xAxisRange,
+            title: "Y_profile",
+            label: "Median z [mm]",
+          });
+        }
+
         const activeProfileIndex = analyzeResult.response.ok
           ? analyzeResult.data.profile_index
           : scanResult.response.ok
@@ -1148,22 +1308,20 @@
             ? scanResult.data.y_mm
             : null;
 
-        await loadProfileYValues(id);
-
         if (heatmapResult.response.ok) {
-          profileYValues = Array.isArray(heatmapResult.data.y_mm) ? heatmapResult.data.y_mm : profileYValues;
+          if (Array.isArray(heatmapResult.data.y_mm)) {
+            profileYValues = heatmapResult.data.y_mm;
+          }
           renderHeatmap(heatmapResult.data, activeProfileIndex);
         } else {
           clearHeatmap();
+          await loadProfileYValues(id);
         }
 
         updateProfileSlider(activeProfileIndex, profileCount, activeYMm);
 
         if (!analyzeResult.response.ok && !scanResult.response.ok && showErrors) {
           updateProfileSlider(0, 0);
-          if (profileSlider) {
-            profileSlider.disabled = true;
-          }
         }
       } catch {
         clearGraphs();
@@ -1208,10 +1366,6 @@
         }
 
         const nextProfileIndex = Number.parseInt(profileSlider.value, 10);
-        if (heatmapData) {
-          renderHeatmap(heatmapData, nextProfileIndex);
-        }
-
         loadAnalyzingGraphs(id, nextProfileIndex, false);
       });
     }

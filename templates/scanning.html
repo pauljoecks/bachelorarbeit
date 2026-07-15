@@ -40,8 +40,8 @@
                 />
                 <button
                   type="button"
-                  class="scan-duration-auto-button"
-                  aria-pressed="false"
+                  class="scan-duration-auto-button is-active"
+                  aria-pressed="true"
                 >AUTO</button>
               </div>
               {% else %}
@@ -170,16 +170,18 @@
       },
       label(context) {
         const name = context.dataset.label || "";
+        const xValue = formatTooltipNumber(context.parsed.x);
         const yValue = formatTooltipNumber(context.parsed.y);
-        return yValue ? `${name}: ${yValue}` : name;
-      },
-      afterBody(tooltipItems) {
-        if (!tooltipItems.length) {
-          return [];
+        if (!yValue) {
+          return name;
         }
 
-        const xValue = formatTooltipNumber(tooltipItems[0].parsed.x);
-        return xValue ? [`${xLabel}: ${xValue}`] : [];
+        const parts = [];
+        if (xValue) {
+          parts.push(`${xLabel}: ${xValue}`);
+        }
+        parts.push(name ? `${name}: ${yValue}` : yValue);
+        return parts.join(", ");
       },
     };
   }
@@ -591,11 +593,21 @@
 
     destroyScanningChart();
 
+    const reverseLiveScanAxis = Boolean(data.live);
+
     const titleText = data.live
       ? (data.scanning
         ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
         : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau"))
       : data.json_file;
+
+    const points = data.x_mm
+      .map((xValue, index) => ({
+        x: Number.parseFloat(xValue),
+        y: Number.parseFloat(data.z_mm[index]),
+      }))
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      .sort((left, right) => left.x - right.x);
 
     scanningChart = new Chart(graphCanvas, {
       type: "line",
@@ -603,12 +615,7 @@
         datasets: [
           {
             label: "Höhe z [mm]",
-            data: data.x_mm
-              .map((xValue, index) => ({
-                x: Number.parseFloat(xValue),
-                y: Number.parseFloat(data.z_mm[index]),
-              }))
-              .sort((left, right) => left.x - right.x),
+            data: points,
             borderColor: data.live ? "#34d399" : "#38bdf8",
             backgroundColor: data.live ? "#34d39933" : "#38bdf833",
             borderWidth: 1.5,
@@ -642,12 +649,15 @@
             },
           },
           tooltip: {
+            mode: "nearest",
+            intersect: false,
             callbacks: buildPrimaryYTooltipCallbacks("x [mm]"),
           },
         },
         scales: {
           x: {
             type: "linear",
+            reverse: reverseLiveScanAxis,
             title: {
               display: true,
               text: "x [mm]",
@@ -685,10 +695,13 @@
       return;
     }
 
-    const points = data.x_mm.map((xValue, index) => ({
-      x: xValue,
-      y: data.z_mm[index],
-    }));
+    const points = data.x_mm
+      .map((xValue, index) => ({
+        x: Number.parseFloat(xValue),
+        y: Number.parseFloat(data.z_mm[index]),
+      }))
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      .sort((left, right) => left.x - right.x);
 
     if (!scanningChart) {
       renderScanningChart(data);
@@ -701,6 +714,7 @@
     scanningChart.options.plugins.title.text = data.scanning
       ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
       : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau");
+    scanningChart.options.scales.x.reverse = Boolean(data.live);
     scanningChart.options.scales.y.title.color = "#34d399";
     scanningChart.options.scales.y.ticks.color = "#34d399";
     scanningChart.update("none");
@@ -830,9 +844,6 @@
           setGraphStatus(data.message || "Scan läuft...", "loading");
         } else {
           updateProfileSlider(0, 1);
-          if (profileSlider) {
-            profileSlider.disabled = true;
-          }
           updateLiveProfileChart(data);
           setGraphStatus(buildLiveGraphStatus(data), "");
         }
@@ -887,9 +898,6 @@
     destroyScanningChart();
     profileYValues = [];
     updateProfileSlider(0, 0);
-    if (profileSlider) {
-      profileSlider.disabled = true;
-    }
     setGraphStatus("", "");
   }
 
@@ -899,9 +907,6 @@
     if (!id || id.length !== 3) {
       destroyScanningChart();
       updateProfileSlider(0, 0);
-      if (profileSlider) {
-        profileSlider.disabled = true;
-      }
       setGraphStatus("", "");
       return;
     }
@@ -919,9 +924,6 @@
         destroyScanningChart();
         profileYValues = [];
         updateProfileSlider(0, 0);
-        if (profileSlider) {
-          profileSlider.disabled = true;
-        }
         setGraphStatus(showErrors ? (data.error || "Keine Scan-Daten.") : "", showErrors ? "error" : "");
         return;
       }
@@ -939,9 +941,6 @@
     } catch {
       destroyScanningChart();
       updateProfileSlider(0, 0);
-      if (profileSlider) {
-        profileSlider.disabled = true;
-      }
       setGraphStatus(showErrors ? "Verbindungsfehler." : "", showErrors ? "error" : "");
     } finally {
       isLoadingGraph = false;
@@ -999,7 +998,7 @@
     });
     setResolutionValue("");
     lastManualScanDuration = "";
-    setScanDurationAuto(false, { preserveManual: true, skipPersist: true });
+    setScanDurationAuto(true, { preserveManual: true, skipPersist: true });
     savedScanSettings = {};
   }
 
@@ -1235,7 +1234,7 @@
     }
 
     const confirmed = window.confirm(
-      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert und die JSON-Datei aus data/scanning gelöscht.`
+      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert, die JSON-Datei aus data/scanning und der Analyse-Ordner aus data/analyzing gelöscht.`
     );
     if (!confirmed) {
       return;
@@ -1257,7 +1256,14 @@
         return;
       }
 
-      const deletedHint = data.deleted_file ? ` (${data.deleted_file} gelöscht)` : "";
+      const deletedParts = [];
+      if (data.deleted_file) {
+        deletedParts.push(data.deleted_file);
+      }
+      if (data.deleted_analyze_folder) {
+        deletedParts.push(data.deleted_analyze_folder);
+      }
+      const deletedHint = deletedParts.length ? ` (${deletedParts.join(", ")} gelöscht)` : "";
       setStatus(`Scan zurückgesetzt${deletedHint}.`, "success");
       sessionStorage.setItem("versuchs-data-changed", String(Date.now()));
       currentIsScanned = Boolean(data.is_scanned);
@@ -1350,5 +1356,6 @@
   if (scanningResetButton) {
     scanningResetButton.addEventListener("click", resetScanning);
   }
+
 </script>
 {% endblock %}

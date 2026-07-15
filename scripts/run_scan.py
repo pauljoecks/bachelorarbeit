@@ -219,6 +219,66 @@ def enrich_scan_payload_with_geometry(scan_payload: dict, scan_speed_mm_s: float
     scan_payload["scan_settings"] = scan_settings
 
 
+def _normalize_scan_x_mm(profiles: list[dict]) -> None:
+    """Shift x_mm so the global minimum becomes 0 before persisting scan data."""
+    if not profiles:
+        return
+
+    global_x_min = None
+    for profile in profiles:
+        for value in profile.get("x_mm") or []:
+            x_value = float(value)
+            global_x_min = x_value if global_x_min is None else min(global_x_min, x_value)
+
+    if global_x_min is None or global_x_min >= 0:
+        return
+
+    for profile in profiles:
+        x_mm = profile.get("x_mm")
+        if not x_mm:
+            continue
+        profile["x_mm"] = [round(float(value) - global_x_min, 6) for value in x_mm]
+
+
+def _reverse_profile_x_direction(profiles: list[dict]) -> None:
+    """Mirror x with a shared maximum and reverse point order for the opposite probe edge."""
+    if not profiles:
+        return
+
+    global_x_max = None
+    for profile in profiles:
+        for value in profile.get("x_mm") or []:
+            x_value = float(value)
+            global_x_max = x_value if global_x_max is None else max(global_x_max, x_value)
+
+    if global_x_max is None:
+        return
+
+    for profile in profiles:
+        x_mm = profile.get("x_mm") or []
+        if len(x_mm) < 2:
+            continue
+
+        x_values = [float(value) for value in x_mm]
+        z_mm = list(profile.get("z_mm") or [])
+        intensities = list(profile.get("intensities") or [])
+
+        flipped_x: list[float] = []
+        flipped_z: list[float] = []
+        flipped_intensities: list[int] = []
+        for index in reversed(range(len(x_values))):
+            flipped_x.append(round(global_x_max - x_values[index], 6))
+            if index < len(z_mm):
+                flipped_z.append(z_mm[index])
+            if index < len(intensities):
+                flipped_intensities.append(intensities[index])
+
+        profile["x_mm"] = flipped_x
+        profile["z_mm"] = flipped_z
+        if intensities:
+            profile["intensities"] = flipped_intensities
+
+
 class ScanError(Exception):
     pass
 
@@ -465,23 +525,20 @@ def _profile_has_valid_points(x, z, intensities, resolution: int) -> bool:
 
 
 def _profile_has_measurement(profile_data: dict) -> bool:
-    intensities = np.asarray(profile_data["intensities"], dtype=float)
-    if np.any(intensities > 0):
-        return True
-
-    x_mm = np.asarray(profile_data["x_mm"], dtype=float)
-    z_mm = np.asarray(profile_data["z_mm"], dtype=float)
-    return bool(np.any((np.abs(x_mm) > 1e-6) & (np.abs(z_mm) > 1e-6)))
+    return bool(np.any(_profile_measurement_mask(profile_data)))
 
 
 def _profile_measurement_mask(profile_data: dict) -> np.ndarray:
-    intensities = np.asarray(profile_data["intensities"], dtype=float)
-    mask = intensities > 0
-    if np.any(mask):
-        return mask
-
     x_mm = np.asarray(profile_data["x_mm"], dtype=float)
     z_mm = np.asarray(profile_data["z_mm"], dtype=float)
+    intensities = profile_data.get("intensities")
+
+    if intensities is not None:
+        intensities = np.asarray(intensities, dtype=float)
+        mask = intensities > 0
+        if np.any(mask):
+            return mask
+
     return (np.abs(x_mm) > 1e-6) & (np.abs(z_mm) > 1e-6)
 
 
@@ -1189,6 +1246,15 @@ def _capture_demo_profiles_auto(experiment_id: str, scan_settings: ScanSettings)
     }
 
 
+def _align_scan_profiles_to_probe_origin(profiles: list[dict]) -> dict | None:
+    from run_analyze import MIRROR_ORIGIN_EDGE_EXCLUSION_MM, align_profiles_to_probe_origin
+
+    return align_profiles_to_probe_origin(
+        profiles,
+        exclude_probe_x_below_mm=MIRROR_ORIGIN_EDGE_EXCLUSION_MM,
+    )
+
+
 def _save_scan_results(
     experiment_id: str,
     scan_payload: dict,
@@ -1199,6 +1265,15 @@ def _save_scan_results(
     basename = _build_output_basename(experiment_id, timestamp)
     json_path = output_dir / f"{basename}.json"
 
+    profiles = scan_payload["profiles"]
+    _reverse_profile_x_direction(profiles)
+
+    probe_origin = _align_scan_profiles_to_probe_origin(profiles)
+    if probe_origin is None:
+        _normalize_scan_x_mm(profiles)
+    else:
+        scan_payload["probe_origin"] = probe_origin
+
     document = {
         "experiment_id": experiment_id,
         "timestamp": timestamp.isoformat(timespec="seconds"),
@@ -1207,6 +1282,8 @@ def _save_scan_results(
         "profile_count": scan_payload["profile_count"],
         "profiles": scan_payload["profiles"],
     }
+    if scan_payload.get("probe_origin"):
+        document["probe_origin"] = scan_payload["probe_origin"]
     if scan_payload.get("scan_settings"):
         document["scan_settings"] = scan_payload["scan_settings"]
     if scan_payload.get("demo_mode"):
