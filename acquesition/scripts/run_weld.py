@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a welding measurement with threshold trigger and save results to data/welding."""
+"""Run a welding measurement with threshold trigger and save results to data/acquesition/welding."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT_DIR = BASE_DIR / "data" / "welding"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_OUTPUT_DIR = BASE_DIR / "data" / "acquesition" / "welding"
 
 try:
     import nidaqmx
@@ -29,6 +29,10 @@ except ImportError:
 
 
 class WeldError(Exception):
+    pass
+
+
+class WeldAbortedError(WeldError):
     pass
 
 
@@ -154,6 +158,92 @@ def get_weld_plot_data(experiment_id: str, since: int = 0) -> dict | None:
         }
 
 
+_monitor_lock = threading.RLock()
+_monitor_state = {
+    "active": False,
+    "demo_mode": False,
+    "current_a": None,
+    "voltage_v": None,
+}
+_monitor_stop_event = threading.Event()
+
+
+def get_weld_monitor_readings() -> dict:
+    with _monitor_lock:
+        return {
+            "active": bool(_monitor_state["active"]),
+            "demo_mode": bool(_monitor_state["demo_mode"]),
+            "current_a": _monitor_state["current_a"],
+            "voltage_v": _monitor_state["voltage_v"],
+        }
+
+
+def start_weld_monitor(config: WeldConfig | None = None) -> None:
+    with _monitor_lock:
+        if _monitor_state["active"]:
+            return
+    _monitor_stop_event.clear()
+    cfg = config or WeldConfig()
+    thread = threading.Thread(target=_weld_monitor_loop, args=(cfg,), daemon=True)
+    thread.start()
+
+
+def stop_weld_monitor() -> None:
+    _monitor_stop_event.set()
+    time.sleep(0.3)
+
+
+def _weld_monitor_loop(config: WeldConfig) -> None:
+    demo_mode = not NIDAQMX_AVAILABLE
+    task = None
+
+    if NIDAQMX_AVAILABLE:
+        chan_string = ", ".join(f"{config.device}/ai{ch}" for ch in config.channels)
+        task = nidaqmx.Task()
+        task.ai_channels.add_ai_voltage_chan(
+            chan_string,
+            min_val=-10.0,
+            max_val=10.0,
+            terminal_config=TerminalConfiguration.RSE,
+        )
+
+    with _monitor_lock:
+        _monitor_state["active"] = True
+        _monitor_state["demo_mode"] = demo_mode
+
+    try:
+        rng = np.random.default_rng()
+        while not _monitor_stop_event.is_set():
+            if task is not None:
+                try:
+                    vals = task.read()
+                    if isinstance(vals, list):
+                        voltage_raw = float(vals[0])
+                        current_raw = float(vals[1]) if len(vals) > 1 else 0.0
+                    else:
+                        voltage_raw = float(vals)
+                        current_raw = 0.0
+                    voltage_v = round(voltage_raw * config.voltage_scale, 2)
+                    current_a = round(current_raw * config.current_scale, 2)
+                except Exception:
+                    voltage_v = 0.0
+                    current_a = 0.0
+            else:
+                voltage_v = round(float(rng.normal(0.0, 0.5)), 2)
+                current_a = round(float(rng.normal(0.0, 2.0)), 2)
+
+            with _monitor_lock:
+                _monitor_state["current_a"] = current_a
+                _monitor_state["voltage_v"] = voltage_v
+
+            time.sleep(0.5)
+    finally:
+        if task is not None:
+            task.close()
+        with _monitor_lock:
+            _monitor_state["active"] = False
+
+
 def _update_weld_live_chunk(
     *,
     voltage_raw: np.ndarray,
@@ -197,11 +287,13 @@ def _save_weld_h5(
     h5_path: Path,
     time_s: np.ndarray,
     channels: list[tuple[str, np.ndarray, str, str]],
+    *,
+    compression: str | None = "gzip",
 ) -> None:
     with h5py.File(h5_path, "w") as h5_file:
-        h5_file.create_dataset("time_s", data=time_s, compression="gzip")
+        h5_file.create_dataset("time_s", data=time_s, compression=compression)
         for key, values, label, units in channels:
-            dataset = h5_file.create_dataset(key, data=values, compression="gzip")
+            dataset = h5_file.create_dataset(key, data=values, compression=compression)
             dataset.attrs["label"] = label
             dataset.attrs["units"] = units
 
@@ -312,7 +404,7 @@ def _capture_demo_weld(config: WeldConfig, abort_event: threading.Event | None =
 
     while True:
         if abort_event and abort_event.is_set():
-            raise WeldError("Schweißen abgebrochen.")
+            raise WeldAbortedError("Schweißen abgebrochen.")
 
         elapsed = time.time() - start_time
         if elapsed > config.max_duration_s:
@@ -430,7 +522,7 @@ def _capture_hardware_weld(config: WeldConfig, abort_event: threading.Event | No
         try:
             while True:
                 if abort_event and abort_event.is_set():
-                    raise WeldError("Schweißen abgebrochen.")
+                    raise WeldAbortedError("Schweißen abgebrochen.")
 
                 elapsed = time.time() - start_time
                 if elapsed > config.max_duration_s:

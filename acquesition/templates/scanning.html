@@ -94,6 +94,9 @@
   <button type="button" id="scanning-action-button" class="welding-action-button" disabled>
     START SCANNING
   </button>
+  <button type="button" id="scanning-abort-button" class="welding-action-button welding-action-button-abort" hidden>
+    ABBRECHEN
+  </button>
   <button type="button" id="scanning-reset-button" class="welding-action-button welding-action-button-compact" disabled>
     SCAN ZURÜCKSETZEN
   </button>
@@ -130,6 +133,7 @@
   const pathImage = document.getElementById("scanning-path-image");
   const pathImagePlaceholder = document.getElementById("scanning-path-placeholder");
   const scanningActionButton = document.getElementById("scanning-action-button");
+  const scanningAbortButton = document.getElementById("scanning-abort-button");
   const scanningResetButton = document.getElementById("scanning-reset-button");
   const graphStatusEl = document.getElementById("scanning-graph-status");
   const graphCanvas = document.getElementById("scanning-graph-canvas");
@@ -187,6 +191,7 @@
   }
 
   let isStartingScan = false;
+  let isAbortingScan = false;
   let isResettingScan = false;
   let currentIsScanned = false;
   let isSavingFields = false;
@@ -485,6 +490,7 @@
     currentIsScanned = Boolean(isScanned);
     const id = idInput?.value ?? "";
     const hasValidId = id.length === 3;
+    const scanRunning = isStartingScan;
     const scanSettingsReady = (
       areScanSettingsComplete()
       && !isSavingFields
@@ -492,6 +498,7 @@
     );
 
     if (scanningActionButton) {
+      scanningActionButton.hidden = scanRunning;
       scanningActionButton.disabled = (
         !hasValidId
         || currentIsScanned
@@ -499,6 +506,11 @@
         || isStartingScan
         || !scanSettingsReady
       );
+    }
+
+    if (scanningAbortButton) {
+      scanningAbortButton.hidden = !scanRunning;
+      scanningAbortButton.disabled = !scanRunning || isAbortingScan;
     }
 
     if (scanningResetButton) {
@@ -1170,7 +1182,38 @@
         throw new Error(data.error);
       }
 
+      if (data.aborted) {
+        return { aborted: true };
+      }
+
       return data;
+    }
+  }
+
+  async function abortScanning() {
+    const id = idInput?.value ?? "";
+    if (!isStartingScan || id.length !== 3) {
+      return;
+    }
+
+    isAbortingScan = true;
+    clearScanningVisuals();
+    syncScanningActionButtons();
+    setStatus("Abbruch wird angefordert...", "loading");
+
+    try {
+      const response = await fetch(`/api/scanning/abort/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setStatus(data.error || "Abbruch fehlgeschlagen.", "error");
+      }
+    } catch {
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isAbortingScan = false;
+      syncScanningActionButtons();
     }
   }
 
@@ -1182,6 +1225,7 @@
 
     isStartingScan = true;
     setStatus("Scan läuft...", "loading");
+    clearScanningVisuals();
     syncScanningActionButtons();
 
     if (!livePreviewActive) {
@@ -1206,6 +1250,15 @@
       }
 
       const result = await pollScanStatus(id);
+
+      if (result.aborted) {
+        await stopLivePreview(id, { closeScanner: false });
+        clearScanningVisuals();
+        syncScanningActionButtons(false);
+        setStatus("Scan abgebrochen.", "");
+        await startLivePreview(id);
+        return;
+      }
 
       syncScanningActionButtons(true);
       const modeHint = result.demo_mode ? " (Demo)" : "";
@@ -1234,7 +1287,7 @@
     }
 
     const confirmed = window.confirm(
-      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert, die JSON-Datei aus data/scanning und der Analyse-Ordner aus data/analyzing gelöscht.`
+      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert, die JSON-Datei aus data/acquesition/scanning und der Generate-Ordner aus data/preparation/generated gelöscht.`
     );
     if (!confirmed) {
       return;
@@ -1351,6 +1404,10 @@
 
   if (scanningActionButton) {
     scanningActionButton.addEventListener("click", startScanning);
+  }
+
+  if (scanningAbortButton) {
+    scanningAbortButton.addEventListener("click", abortScanning);
   }
 
   if (scanningResetButton) {

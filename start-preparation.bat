@@ -15,7 +15,7 @@ call "%CONDA_BASE%\Scripts\activate.bat" "%CONDA_BASE%"
 conda env list | findstr /B /C:"%CONDA_ENV% " >nul 2>&1
 if errorlevel 1 (
     echo Conda environment "%CONDA_ENV%" not found.
-    echo Please run setup\setup-server.bat first.
+    echo Please run setup\setup-env.bat first.
     pause
     exit /b 1
 )
@@ -27,16 +27,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set SCAN_USE_DEMO=0
-set SCANNER_IP=192.168.0.1
-set WELD_USE_DEMO=0
-set WELD_DEVICE=cDAQ4Mod1
+set PREPARATION_PORT=5001
 
 echo.
-echo Server-Modus:
-echo   SCAN_USE_DEMO=%SCAN_USE_DEMO%
-echo   WELD_USE_DEMO=%WELD_USE_DEMO%
+echo Preparation-Modus:
+echo   PREPARATION_PORT=%PREPARATION_PORT%
+echo   http://localhost:%PREPARATION_PORT%
 echo.
 
-python scripts\server.py
+python preparation\scripts\preparation.py
 if errorlevel 1 pause

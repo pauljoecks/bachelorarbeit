@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a scanCONTROL profile acquisition and save results to data/scanning."""
+"""Run a scanCONTROL profile acquisition and save results to data/acquesition/scanning."""
 
 from __future__ import annotations
 
@@ -19,10 +19,11 @@ from pathlib import Path
 
 import numpy as np
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT_DIR = BASE_DIR / "data" / "scanning"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+ACQUESITION_DIR = BASE_DIR / "acquesition"
+DEFAULT_OUTPUT_DIR = BASE_DIR / "data" / "acquesition" / "scanning"
 PYLLT_BINDING_DIR = (
-    BASE_DIR
+    ACQUESITION_DIR
     / "scanCONTROL"
     / "scanCONTROL Windows SDK 4.2"
     / "C++ SDK (+python bindings)"
@@ -44,8 +45,8 @@ AUTO_MAX_WAIT_S = 300.0
 AUTO_MAX_TOTAL_S = 600.0
 AUTO_BASELINE_WINDOW = 20
 AUTO_BASELINE_MIN_PROFILES = 10
-AUTO_ENTRY_DEVIATION_MM = 1.5
-AUTO_EXIT_DEVIATION_MM = 0.5
+AUTO_ENTRY_DEVIATION_MM = 3.0
+AUTO_EXIT_DEVIATION_MM = 3.0
 AUTO_ENTRY_STREAK = 3
 AUTO_EXIT_STREAK = 3
 
@@ -281,6 +282,15 @@ def _reverse_profile_x_direction(profiles: list[dict]) -> None:
 
 class ScanError(Exception):
     pass
+
+
+class ScanAbortedError(ScanError):
+    pass
+
+
+def _raise_if_aborted(abort_event: threading.Event | None) -> None:
+    if abort_event and abort_event.is_set():
+        raise ScanAbortedError("Scan abgebrochen.")
 
 
 def _python_bitness() -> int:
@@ -543,13 +553,21 @@ def _profile_measurement_mask(profile_data: dict) -> np.ndarray:
 
 
 def _profile_deviation_mm(profile_data: dict, baseline_data: dict) -> float:
+    """Robust probe-vs-table score: 90th percentile of |Δz| on valid points.
+
+    Mean absolute deviation underestimates thin plates (~1 mm) that still cover
+    most of the laser line, which made AUTO/Analyse miss the mid section of TST.
+    """
     mask = _profile_measurement_mask(profile_data) & _profile_measurement_mask(baseline_data)
     if not np.any(mask):
         return 0.0
 
     profile_z = np.asarray(profile_data["z_mm"], dtype=float)
     baseline_z = np.asarray(baseline_data["z_mm"], dtype=float)
-    return float(np.mean(np.abs(profile_z[mask] - baseline_z[mask])))
+    delta = np.abs(profile_z[mask] - baseline_z[mask])
+    if delta.size == 0:
+        return 0.0
+    return float(np.percentile(delta, 90))
 
 
 def _compute_baseline_profile(profiles: list[dict]) -> dict | None:
@@ -849,7 +867,11 @@ def _select_resolution(available_resolutions, requested_resolution: int) -> int:
     )
 
 
-def _capture_profiles(scanner_ip: str | None = None, settings: ScanSettings | None = None) -> dict:
+def _capture_profiles(
+    scanner_ip: str | None = None,
+    settings: ScanSettings | None = None,
+    abort_event: threading.Event | None = None,
+) -> dict:
     scan_settings = settings or ScanSettings.defaults()
     import pyllt as llt
 
@@ -916,10 +938,10 @@ def _capture_profiles(scanner_ip: str | None = None, settings: ScanSettings | No
         warmup_remaining = WARMUP_PROFILES
         collection_deadline = None
         scanner_type_enum = llt.TScannerType(int(scanner_type.value))
-        target_profile_count = scan_settings.target_profile_count
 
         try:
             while collection_deadline is None or time.time() < collection_deadline:
+                _raise_if_aborted(abort_event)
                 ret = llt.get_actual_profile(
                     hllt,
                     profile_buffer,
@@ -981,13 +1003,6 @@ def _capture_profiles(scanner_ip: str | None = None, settings: ScanSettings | No
         finally:
             llt.transfer_profiles(hllt, llt.TTransferProfileType.NORMAL_TRANSFER, 0)
 
-        if len(profiles) < target_profile_count:
-            raise ScanError(
-                f"Nur {len(profiles)} von {target_profile_count} Profilen in "
-                f"{scan_settings.scan_duration_s} s erfasst. "
-                "Prüfen: EXPOSURE, PROFILEFREQUENCY, SCANDURATION und Messobjekt."
-            )
-
         _raise_if_profiles_invalid(profiles, int(scanner_type.value), scan_settings)
 
         return {
@@ -1002,7 +1017,11 @@ def _capture_profiles(scanner_ip: str | None = None, settings: ScanSettings | No
         llt.del_device(hllt)
 
 
-def _capture_profiles_auto(scanner_ip: str | None = None, settings: ScanSettings | None = None) -> dict:
+def _capture_profiles_auto(
+    scanner_ip: str | None = None,
+    settings: ScanSettings | None = None,
+    abort_event: threading.Event | None = None,
+) -> dict:
     scan_settings = settings or ScanSettings.defaults()
     import pyllt as llt
 
@@ -1084,6 +1103,7 @@ def _capture_profiles_auto(scanner_ip: str | None = None, settings: ScanSettings
                 last_read_at = time.time()
 
             while not tracker.done:
+                _raise_if_aborted(abort_event)
                 if time.time() - scan_start_time > AUTO_MAX_TOTAL_S:
                     raise ScanError(
                         f"AUTO-Scan: Gesamtzeit von {int(AUTO_MAX_TOTAL_S)} s überschritten."
@@ -1154,10 +1174,14 @@ def _capture_profiles_auto(scanner_ip: str | None = None, settings: ScanSettings
         llt.del_device(hllt)
 
 
-def _capture_demo_profiles(experiment_id: str, settings: ScanSettings | None = None) -> dict:
+def _capture_demo_profiles(
+    experiment_id: str,
+    settings: ScanSettings | None = None,
+    abort_event: threading.Event | None = None,
+) -> dict:
     scan_settings = settings or ScanSettings.defaults()
     if scan_settings.scan_duration_auto:
-        return _capture_demo_profiles_auto(experiment_id, scan_settings)
+        return _capture_demo_profiles_auto(experiment_id, scan_settings, abort_event=abort_event)
 
     resolution = scan_settings.resolution
     target_profile_count = scan_settings.target_profile_count
@@ -1166,6 +1190,7 @@ def _capture_demo_profiles(experiment_id: str, settings: ScanSettings | None = N
 
     profiles: list[dict] = []
     for profile_index in range(target_profile_count):
+        _raise_if_aborted(abort_event)
         phase = profile_index * 0.08
         z = 120.0 + 8.0 * np.sin(x / 6.0 + phase) + 0.05 * rng.random(resolution)
         intensities = np.clip(400 + 300 * np.cos(x / 10.0 + phase * 0.5), 0, 1200).astype(int)
@@ -1189,7 +1214,11 @@ def _capture_demo_profiles(experiment_id: str, settings: ScanSettings | None = N
     }
 
 
-def _capture_demo_profiles_auto(experiment_id: str, scan_settings: ScanSettings) -> dict:
+def _capture_demo_profiles_auto(
+    experiment_id: str,
+    scan_settings: ScanSettings,
+    abort_event: threading.Event | None = None,
+) -> dict:
     resolution = scan_settings.resolution
     profile_interval_s = scan_settings.profile_interval_s()
     x = np.linspace(-40.0, 40.0, resolution)
@@ -1202,6 +1231,7 @@ def _capture_demo_profiles_auto(experiment_id: str, scan_settings: ScanSettings)
     table_intensities = np.clip(450 + 20 * rng.random(resolution), 200, 1200).astype(int)
 
     while not tracker.done:
+        _raise_if_aborted(abort_event)
         if time.time() - scan_start_time > AUTO_MAX_TOTAL_S:
             raise ScanError(f"AUTO-Scan: Gesamtzeit von {int(AUTO_MAX_TOTAL_S)} s überschritten.")
 
@@ -1312,6 +1342,7 @@ def run_scan(
     scanner_ip: str | None = None,
     settings: ScanSettings | None = None,
     scan_speed_mm_s: float | None = None,
+    abort_event: threading.Event | None = None,
 ) -> dict:
     experiment_id = experiment_id.strip().upper()
     timestamp = datetime.now()
@@ -1319,13 +1350,25 @@ def run_scan(
     begin_scan_progress(experiment_id, demo=demo)
     try:
         if demo:
-            scan_payload = _capture_demo_profiles(experiment_id, settings=settings)
+            scan_payload = _capture_demo_profiles(
+                experiment_id,
+                settings=settings,
+                abort_event=abort_event,
+            )
         else:
             _ensure_pyllt_path()
             if settings and settings.scan_duration_auto:
-                scan_payload = _capture_profiles_auto(scanner_ip=scanner_ip, settings=settings)
+                scan_payload = _capture_profiles_auto(
+                    scanner_ip=scanner_ip,
+                    settings=settings,
+                    abort_event=abort_event,
+                )
             else:
-                scan_payload = _capture_profiles(scanner_ip=scanner_ip, settings=settings)
+                scan_payload = _capture_profiles(
+                    scanner_ip=scanner_ip,
+                    settings=settings,
+                    abort_event=abort_event,
+                )
 
         enrich_scan_payload_with_geometry(scan_payload, scan_speed_mm_s)
         return _save_scan_results(experiment_id, scan_payload, output_dir, timestamp)

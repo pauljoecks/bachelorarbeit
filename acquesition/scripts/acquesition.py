@@ -6,20 +6,30 @@ import shutil
 import sys
 import threading
 from datetime import datetime
+from io import BytesIO
 
 import h5py
 import numpy as np
 import pandas as pd
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, url_for
-from openpyxl import load_workbook
+from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory, url_for
+from openpyxl import Workbook, load_workbook
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-TEMPLATES_DIR = BASE_DIR / "templates"
-DEFAULT_VERSUCHSUEBERSICHT = BASE_DIR / "data" / "Versuchsübersicht.xlsx"
-DEFAULT_VERSUCHSUEBERSICHT_PATH = "data/Versuchsübersicht.xlsx"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+ACQUESITION_DIR = BASE_DIR / "acquesition"
+SCRIPTS_DIR = ACQUESITION_DIR / "scripts"
+TEMPLATES_DIR = ACQUESITION_DIR / "templates"
+DEFAULT_DATA_DIR_PATH = "data"
+DEFAULT_DATA_DIR = Path(DEFAULT_DATA_DIR_PATH)
+VERSUCHSUEBERSICHT_FILENAME = "Versuchsübersicht.xlsx"
+DEFAULT_VERSUCHSUEBERSICHT = DEFAULT_DATA_DIR / VERSUCHSUEBERSICHT_FILENAME
+DATA_PATH_SUGGESTIONS = [
+    "//han.isf.rwth-aachen.de/temp/par-jo/data",
+    "data",
+]
 
 app = Flask(__name__, template_folder=str(TEMPLATES_DIR))
 
+data_dir = None
 versuchsuebersicht_path = None
 versuchsuebersicht_data = None
 _scan_document_cache = {}
@@ -29,9 +39,9 @@ _excel_workbook_lock = threading.Lock()
 _weld_jobs = {}
 _weld_jobs_lock = threading.Lock()
 _weld_abort_events = {}
+_scan_abort_events = {}
 
 MENU_TABLE_COLUMNS = ["COUNT", "ID", "WELDED", "SCANNED", "SERIES", "NUMBER", "COMMENT"]
-ANALYZING_TABLE_COLUMNS = ["COUNT", "ID", "WELDED", "SCANNED"]
 MENU_FILTER_OPTIONS = ["WELDED", "SCANNED", "ID"]
 WELDING_FORM_COLUMNS = ["PATH ID", "WFS [m/min]", "WS [m/min]", "SERIES", "NUMBER", "COMMENT"]
 SCANSPEED_COLUMN = "SCANSPEED [mm/s]"
@@ -40,6 +50,8 @@ WELDING_PARAM_TABLE_COLUMNS = [
     ["WIRE", "WIREDIA [mm]", "GAS", "GASFLOW [l/min]", "POWERSOURCE", "PROCESS"],
     ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION", "SCANNED", "JSONFILE"],
 ]
+MENU_STECKBRIEF_WELD_COLUMNS = list(WELDING_PARAM_TABLE_COLUMNS[0])
+MENU_STECKBRIEF_SCAN_COLUMNS = list(WELDING_PARAM_TABLE_COLUMNS[2])
 WELDING_PARAM_READONLY_COLUMNS = {
     "WELDED",
     "H5FILE",
@@ -75,16 +87,12 @@ SCANNING_PARAM_READONLY_COLUMNS = {
 }
 PATH_ID_OPTIONS = ["SO", "PO", "SI", "ME", "LI"]
 PATH_IMAGES_DIR = TEMPLATES_DIR / "path_images"
-WELDING_DATA_DIR = BASE_DIR / "data" / "welding"
-SCANNING_DATA_DIR = BASE_DIR / "data" / "scanning"
-ANALYZING_DATA_DIR = BASE_DIR / "data" / "analyzing"
+ACQUESITION_DATA_DIR_NAME = "acquesition"
+WELDING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "welding"
+SCANNING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "scanning"
+GENERATE_DATA_DIR = DEFAULT_DATA_DIR / "preparation" / "generated"
 WELDING_METADATA_COLUMNS = ["H5FILE"]
 SCANNING_METADATA_COLUMNS = ["JSONFILE"]
-ANALYZING_METADATA_COLUMNS = ["ANALYZEFOLDER"]
-ANALYZE_SCAN_FILENAME = "cropped_scan.json"
-ANALYZE_WELD_FILENAME = "cropped_weld.h5"
-ANALYZE_X_PROFILE_FILENAME = "X_profile.json"
-ANALYZE_Y_PROFILE_FILENAME = "Y_profile.json"
 SCAN_SETTINGS_COLUMNS = ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION"]
 SCAN_DEFAULT_EXPOSURE_US = 100
 SCAN_RESOLUTION_OPTIONS = [160, 320, 640, 1280]
@@ -111,7 +119,7 @@ WELD_THRESHOLD_V = float(os.environ.get("WELD_THRESHOLD_V", "0.2"))
 WELD_PRE_TIME_S = float(os.environ.get("WELD_PRE_TIME_S", "2.0"))
 WELD_POST_TIME_S = float(os.environ.get("WELD_POST_TIME_S", "2.0"))
 WELD_MAX_DURATION_S = float(os.environ.get("WELD_MAX_DURATION_S", "300.0"))
-WELDING_GRAPH_MAX_POINTS = 2000
+WELDING_GRAPH_MAX_POINTS = 500
 SCANNING_GRAPH_MAX_POINTS = 400
 DEFAULT_TABLE_FILTER_COLUMN = "WELDED"
 EXCEL_SUFFIXES = {".xlsx", ".xls", ".xlsm"}
@@ -142,11 +150,67 @@ def _normalize_id(value):
     return text
 
 
-def _resolve_path(path_str):
+def _normalize_path_input(path_str: str) -> str:
+    path_str = path_str.strip().strip('"').strip("'")
+    path_str = path_str.replace("\t", "\\t")
+    if path_str.startswith("\\") and not path_str.startswith("\\\\"):
+        path_str = "\\" + path_str
+    return path_str.replace("\\", "/")
+
+
+def _format_path_for_ui(path: Path) -> str:
+    try:
+        return str(path.relative_to(BASE_DIR)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
+def _resolve_path(path_str: str) -> Path:
+    path_str = _normalize_path_input(path_str)
+    if not path_str:
+        return Path(".")
+
     path = Path(path_str)
-    if not path.is_absolute():
-        path = BASE_DIR / path
-    return path
+    if path_str.startswith("//") or path.is_absolute():
+        return path
+
+    return BASE_DIR / path
+
+
+def _clear_data_runtime_caches() -> None:
+    global _scan_document_cache
+
+    _scan_document_cache.clear()
+
+
+def _configure_data_dirs(root: Path) -> None:
+    global data_dir, WELDING_DATA_DIR, SCANNING_DATA_DIR, GENERATE_DATA_DIR
+
+    data_dir = root.resolve()
+    WELDING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "welding"
+    SCANNING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "scanning"
+    GENERATE_DATA_DIR = data_dir / "preparation" / "generated"
+
+
+def _find_versuchsuebersicht_excel(root: Path) -> Path:
+    excel_path = root / VERSUCHSUEBERSICHT_FILENAME
+    if excel_path.is_file():
+        return excel_path
+
+    raise ValueError(
+        f'"{VERSUCHSUEBERSICHT_FILENAME}" nicht gefunden im Ordner: {root}'
+    )
+
+
+def _load_data_dir(path: Path) -> dict:
+    path = Path(path)
+    if not path.is_dir():
+        raise ValueError(f"Pfad muss ein Ordner sein: {path}")
+
+    excel_path = _find_versuchsuebersicht_excel(path)
+    _configure_data_dirs(path)
+    _clear_data_runtime_caches()
+    return _load_versuchsuebersicht_from_path(excel_path)
 
 
 def _build_id_index(rows, columns):
@@ -187,7 +251,6 @@ def _required_excel_column_names():
         + WELDING_FORM_COLUMNS
         + WELDING_METADATA_COLUMNS
         + SCANNING_METADATA_COLUMNS
-        + ANALYZING_METADATA_COLUMNS
         + _flat_welding_param_columns()
     )
     return sorted(required)
@@ -486,7 +549,7 @@ def _get_live_profile_settings(experiment_id):
 
 
 def _import_run_scan():
-    scripts_dir = str(BASE_DIR / "scripts")
+    scripts_dir = str(SCRIPTS_DIR)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     import run_scan
@@ -495,21 +558,12 @@ def _import_run_scan():
 
 
 def _import_run_weld():
-    scripts_dir = str(BASE_DIR / "scripts")
+    scripts_dir = str(SCRIPTS_DIR)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     import run_weld
 
     return run_weld
-
-
-def _import_run_analyze():
-    scripts_dir = str(BASE_DIR / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import run_analyze
-
-    return run_analyze
 
 
 def _close_live_profile_preview():
@@ -573,6 +627,16 @@ def _build_weld_config():
     )
 
 
+def _start_weld_monitor():
+    run_weld = _import_run_weld()
+    run_weld.start_weld_monitor(_build_weld_config())
+
+
+def _stop_weld_monitor():
+    run_weld = _import_run_weld()
+    run_weld.stop_weld_monitor()
+
+
 def _get_weld_job(experiment_id):
     normalized_id = _normalize_id(experiment_id)
     with _weld_jobs_lock:
@@ -598,6 +662,7 @@ def _run_weld_job(experiment_id, use_demo=False):
     with _weld_jobs_lock:
         _weld_abort_events[normalized_id] = abort_event
 
+    _stop_weld_monitor()
     try:
         _set_weld_job(normalized_id, {"status": "running"})
         run_weld = _import_run_weld()
@@ -624,10 +689,15 @@ def _run_weld_job(experiment_id, use_demo=False):
             },
         )
     except Exception as exc:
-        _set_weld_job(normalized_id, {"status": "error", "error": str(exc)})
+        run_weld = _import_run_weld()
+        if isinstance(exc, run_weld.WeldAbortedError):
+            _set_weld_job(normalized_id, {"status": "aborted"})
+        else:
+            _set_weld_job(normalized_id, {"status": "error", "error": str(exc)})
     finally:
         with _weld_jobs_lock:
             _weld_abort_events.pop(normalized_id, None)
+        _start_weld_monitor()
 
 
 def _get_scan_job(experiment_id):
@@ -646,6 +716,7 @@ def _clear_scan_job(experiment_id):
     normalized_id = _normalize_id(experiment_id)
     with _scan_jobs_lock:
         _scan_jobs.pop(normalized_id, None)
+        _scan_abort_events.pop(normalized_id, None)
 
 
 def _capture_live_profile_for_experiment(experiment_id):
@@ -684,6 +755,10 @@ def _extract_auto_scan_duration_s(scan_result):
 
 def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
     normalized_id = _normalize_id(experiment_id)
+    abort_event = threading.Event()
+    with _scan_jobs_lock:
+        _scan_abort_events[normalized_id] = abort_event
+
     try:
         _set_scan_job(normalized_id, {"status": "running"})
         row = versuchsuebersicht_data["id_index"].get(normalized_id) if versuchsuebersicht_data else None
@@ -701,6 +776,7 @@ def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
             scanner_ip=SCANNER_IP,
             settings=settings,
             scan_speed_mm_s=resolved_scanspeed,
+            abort_event=abort_event,
         )
         auto_scan_duration_s = _extract_auto_scan_duration_s(result)
         updated_fields = _mark_experiment_scanned_in_excel(
@@ -723,7 +799,14 @@ def _run_scan_job(experiment_id, scan_settings, use_demo=False, scanspeed=None):
             },
         )
     except Exception as exc:
-        _set_scan_job(normalized_id, {"status": "error", "error": str(exc)})
+        run_scan = _import_run_scan()
+        if isinstance(exc, run_scan.ScanAbortedError):
+            _set_scan_job(normalized_id, {"status": "aborted"})
+        else:
+            _set_scan_job(normalized_id, {"status": "error", "error": str(exc)})
+    finally:
+        with _scan_jobs_lock:
+            _scan_abort_events.pop(normalized_id, None)
 
 
 def _is_default_excel_placeholder_column(name):
@@ -817,12 +900,12 @@ def _refresh_versuchs_row_cache(experiment_id, updated_fields):
         _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
 
 
-def _try_load_default_versuchsuebersicht():
-    if not DEFAULT_VERSUCHSUEBERSICHT.is_file():
+def _try_load_default_data_dir():
+    if not DEFAULT_DATA_DIR.is_dir():
         return
 
     try:
-        _load_versuchsuebersicht_from_path(DEFAULT_VERSUCHSUEBERSICHT)
+        _load_data_dir(DEFAULT_DATA_DIR)
     except Exception:
         pass
 
@@ -832,18 +915,18 @@ def _get_load_status():
         return {"message": "Noch nicht geladen.", "type": "idle"}
 
     row_count = len(versuchsuebersicht_data["rows"])
-    return {"message": f"{row_count} Zeilen geladen.", "type": "success"}
+    path = _get_data_path_display()
+    return {
+        "message": f"{row_count} Zeilen geladen aus {path}.",
+        "type": "success",
+    }
 
 
-def _get_versuchs_path_display():
-    if versuchsuebersicht_path:
-        path = Path(versuchsuebersicht_path)
-        try:
-            return str(path.relative_to(BASE_DIR))
-        except ValueError:
-            return versuchsuebersicht_path
+def _get_data_path_display():
+    if data_dir:
+        return _format_path_for_ui(Path(data_dir))
 
-    return DEFAULT_VERSUCHSUEBERSICHT_PATH
+    return DEFAULT_DATA_DIR_PATH
 
 
 def _has_value(value):
@@ -950,48 +1033,6 @@ def _get_table_rows(filter_column_name):
     return rows
 
 
-def _get_analyzing_table_rows():
-    if versuchsuebersicht_data is None:
-        return []
-
-    columns = versuchsuebersicht_data["columns"]
-    column_map = {name: _find_column(columns, name) for name in ANALYZING_TABLE_COLUMNS}
-    welded_column = _find_column(columns, "WELDED")
-    scanned_column = _find_column(columns, "SCANNED")
-
-    if welded_column is None or scanned_column is None:
-        return []
-
-    rows = []
-    for row in versuchsuebersicht_data["rows"]:
-        if not _has_value(row.get(welded_column)):
-            continue
-        if not _has_value(row.get(scanned_column)):
-            continue
-
-        display_row = {}
-        for name in ANALYZING_TABLE_COLUMNS:
-            source_column = column_map[name]
-            if not source_column:
-                display_row[name] = ""
-                continue
-
-            display_row[name] = _format_display_value(name, row.get(source_column))
-            if name in {"WELDED", "SCANNED"}:
-                parsed = _parse_excel_timestamp(row.get(source_column))
-                if parsed is not None:
-                    display_row[name] = parsed.strftime("%d.%m.%y %H:%M")
-
-        experiment_id = display_row.get("ID", "")
-        display_row["has_analyze"] = (
-            _experiment_has_valid_analyze(experiment_id) if experiment_id else False
-        )
-
-        rows.append(display_row)
-
-    return rows
-
-
 def _build_excel_header_map(worksheet):
     header_map = {}
     for col_idx in range(1, worksheet.max_column + 1):
@@ -1019,6 +1060,80 @@ def _parse_excel_timestamp(value):
         return pd.Timestamp(text).to_pydatetime().replace(tzinfo=None)
     except (ValueError, TypeError):
         return None
+
+
+def _find_excel_append_row(worksheet, header_map):
+    id_col = header_map.get("id")
+    if id_col is None:
+        raise ValueError('Spalte "ID" nicht gefunden.')
+
+    last_used = 1
+    for row_idx in range(2, worksheet.max_row + 1):
+        value = worksheet.cell(row=row_idx, column=id_col).value
+        if _normalize_id(value):
+            last_used = row_idx
+
+    return last_used + 1
+
+
+def _next_count_value():
+    if versuchsuebersicht_data is None:
+        return 1
+
+    count_column = _find_column(versuchsuebersicht_data["columns"], "COUNT")
+    if count_column is None:
+        return len(versuchsuebersicht_data["rows"]) + 1
+
+    max_count = 0
+    for row in versuchsuebersicht_data["rows"]:
+        value = row.get(count_column)
+        if value is None:
+            continue
+        try:
+            number = int(float(str(value).strip().replace(",", ".")))
+        except (TypeError, ValueError):
+            continue
+        if number > max_count:
+            max_count = number
+
+    return max_count + 1
+
+
+def _append_experiment_id_to_excel(path, experiment_id):
+    normalized_id = _normalize_id(experiment_id)
+    if not normalized_id or not re.fullmatch(r"[A-Z]{3}", normalized_id):
+        raise ValueError("ID muss aus 3 Großbuchstaben bestehen.")
+
+    if versuchsuebersicht_data and normalized_id in versuchsuebersicht_data["id_index"]:
+        raise ValueError("ID existiert bereits.")
+
+    with _excel_workbook_lock:
+        workbook = load_workbook(path)
+        worksheet = workbook.active
+        header_map = _build_excel_header_map(worksheet)
+
+        if _find_excel_row_by_id(worksheet, header_map, normalized_id) is not None:
+            raise ValueError("ID existiert bereits.")
+
+        id_col = header_map.get("id")
+        if id_col is None:
+            raise ValueError('Spalte "ID" nicht gefunden.')
+
+        row_idx = _find_excel_append_row(worksheet, header_map)
+        worksheet.cell(row=row_idx, column=id_col, value=normalized_id)
+
+        count_col = header_map.get("count")
+        count_value = _next_count_value()
+        if count_col is not None:
+            worksheet.cell(row=row_idx, column=count_col, value=count_value)
+
+        workbook.save(path)
+
+    return {
+        "id": normalized_id,
+        "count": count_value,
+        "row": row_idx,
+    }
 
 
 def _find_excel_row_by_id(worksheet, header_map, experiment_id):
@@ -1225,66 +1340,6 @@ def _load_scanning_profile_graph(scan_path, profile_index):
     }
 
 
-def _load_analyzing_scan_heatmap(analyze_path):
-    document = _load_scan_document(analyze_path)
-    profiles = document.get("profiles") or []
-    if not profiles:
-        raise ValueError("Keine Profile in Analyse-Datei gefunden.")
-
-    profile_count = len(profiles)
-    resolution = int(document.get("resolution") or len(profiles[0].get("x_mm", [])))
-    x_mm = profiles[0].get("x_mm") or []
-    if not x_mm:
-        raise ValueError("Keine x-Werte in Analyse-Datei gefunden.")
-
-    x_first = float(x_mm[0])
-    x_last = float(x_mm[-1])
-    x_min = min(x_first, x_last)
-    x_max = max(x_first, x_last)
-
-    values = []
-    positive_values = []
-    for profile in profiles:
-        z_row = [float(value) for value in profile.get("z_mm") or []]
-        if len(z_row) != resolution:
-            raise ValueError("Profilauflösung ist in der Analyse-Datei nicht konsistent.")
-        values.extend(z_row)
-        positive_values.extend(value for value in z_row if value > 0)
-
-    z_scale_min = 0.0
-    z_scale_max = 0.0
-    if positive_values:
-        sorted_values = sorted(positive_values)
-        lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
-        upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
-        z_scale_min = float(sorted_values[lower_index])
-        z_scale_max = float(sorted_values[upper_index])
-        if z_scale_max <= z_scale_min:
-            z_scale_min = float(sorted_values[0])
-            z_scale_max = float(sorted_values[-1])
-
-    y_mm = _get_profile_y_mm_values(
-        document,
-        profiles,
-        experiment_id=document.get("experiment_id"),
-    )
-
-    return {
-        "json_file": analyze_path.name,
-        "profile_count": profile_count,
-        "resolution": resolution,
-        "x_min": x_min,
-        "x_max": x_max,
-        "x_reversed": x_first > x_last,
-        "y_mm": y_mm,
-        "y_min": min(y_mm),
-        "y_max": max(y_mm),
-        "z_scale_min": z_scale_min,
-        "z_scale_max": z_scale_max,
-        "values": values,
-    }
-
-
 def _resolve_scan_path_for_experiment(experiment_id):
     try:
         scan_filename = _get_experiment_scan_filename(experiment_id)
@@ -1316,97 +1371,28 @@ def _sanitize_analyze_folder_name(folder_name):
     return name
 
 
+def _list_analyze_folders_for_experiment(experiment_id):
+    normalized_id = _normalize_id(experiment_id)
+    if not normalized_id or not GENERATE_DATA_DIR.is_dir():
+        return []
+
+    prefix = f"{normalized_id}_"
+    folders = []
+    for entry in GENERATE_DATA_DIR.iterdir():
+        if not entry.is_dir() or not entry.name.startswith(prefix):
+            continue
+        try:
+            folders.append(_sanitize_analyze_folder_name(entry.name))
+        except ValueError:
+            continue
+    return sorted(folders)
+
+
 def _get_experiment_analyze_folder(experiment_id):
-    if versuchsuebersicht_data is None:
+    folders = _list_analyze_folders_for_experiment(experiment_id)
+    if not folders:
         return None
-
-    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
-    if row is None:
-        return None
-
-    column = _find_column(versuchsuebersicht_data["columns"], "ANALYZEFOLDER")
-    if column is None:
-        return None
-
-    value = _format_cell_value(row.get(column))
-    if not value:
-        return None
-
-    return _sanitize_analyze_folder_name(value)
-
-
-def _resolve_analyze_folder_for_experiment(experiment_id):
-    try:
-        analyze_folder = _get_experiment_analyze_folder(experiment_id)
-    except ValueError as exc:
-        return None, str(exc)
-
-    if not analyze_folder:
-        return None, "Kein Analyse-Ordner für diese ID."
-
-    folder_path = ANALYZING_DATA_DIR / analyze_folder
-    if not folder_path.is_dir():
-        return None, f"Analyse-Ordner nicht gefunden: {analyze_folder}"
-
-    return folder_path, None
-
-
-def _resolve_analyze_path_for_experiment(experiment_id):
-    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
-    if error:
-        return None, error
-
-    analyze_path = folder_path / ANALYZE_SCAN_FILENAME
-    if not analyze_path.is_file():
-        return None, f"{ANALYZE_SCAN_FILENAME} nicht gefunden in {folder_path.name}."
-
-    return analyze_path, None
-
-
-def _resolve_analyze_weld_path_for_experiment(experiment_id):
-    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
-    if error:
-        return None, error
-
-    analyze_weld_path = folder_path / ANALYZE_WELD_FILENAME
-    if not analyze_weld_path.is_file():
-        return None, f"{ANALYZE_WELD_FILENAME} nicht gefunden in {folder_path.name}."
-
-    return analyze_weld_path, None
-
-
-def _resolve_analyze_profile_path_for_experiment(experiment_id, filename):
-    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
-    if error:
-        return None, error
-
-    profile_path = folder_path / filename
-    if not profile_path.is_file():
-        return None, f"{filename} nicht gefunden in {folder_path.name}."
-
-    return profile_path, None
-
-
-def _load_analyze_profile_graph(profile_path):
-    with profile_path.open("r", encoding="utf-8") as handle:
-        document = json.load(handle)
-
-    if not isinstance(document, dict):
-        raise ValueError("Ungültiges Profil-JSON.")
-
-    return document
-
-
-def _experiment_has_valid_analyze(experiment_id):
-    try:
-        analyze_folder = _get_experiment_analyze_folder(experiment_id)
-    except ValueError:
-        return False
-
-    if not analyze_folder:
-        return False
-
-    return (ANALYZING_DATA_DIR / analyze_folder).is_dir()
+    return folders[-1]
 
 
 def _excel_row_has_scan_metadata(row):
@@ -1453,22 +1439,27 @@ def _apply_scan_display_fields(fields, experiment_id):
     return sanitized
 
 
-def _downsample_welding_series(time_s, channels, max_points):
-    if len(time_s) <= max_points:
-        return time_s, channels
+def _welding_graph_stride(sample_count, max_points):
+    """Return HDF5 slice step so at most max_points samples are read."""
+    if sample_count <= 0 or sample_count <= max_points:
+        return 1
+    return max(1, (sample_count + max_points - 1) // max_points)
 
-    indices = np.linspace(0, len(time_s) - 1, max_points, dtype=int)
-    downsampled_time = time_s[indices]
-    downsampled_channels = []
-    for channel in channels:
-        downsampled_channels.append(
-            {
-                **channel,
-                "values": channel["values"][indices],
-            }
-        )
 
-    return downsampled_time, downsampled_channels
+def _read_h5_dataset_for_graph(dataset, max_points, *, step=None):
+    """Read only ~max_points samples from an HDF5 dataset (stride, not full load)."""
+    sample_count = int(dataset.shape[0]) if dataset.shape else 0
+    if sample_count <= 0:
+        return np.array([], dtype=float)
+
+    read_step = step if step is not None else _welding_graph_stride(sample_count, max_points)
+    if read_step <= 1 and sample_count <= max_points:
+        return np.asarray(dataset, dtype=float)
+
+    values = np.asarray(dataset[::read_step], dtype=float)
+    if values.size > max_points:
+        values = values[:max_points]
+    return values
 
 
 def _format_h5_channel_name(dataset, fallback_name):
@@ -1486,29 +1477,43 @@ def _load_welding_graph_from_h5(h5_path):
         if "time_s" not in h5_file:
             raise ValueError('Datensatz "time_s" nicht gefunden.')
 
-        time_s = np.array(h5_file["time_s"], dtype=float)
+        time_dataset = h5_file["time_s"]
+        sample_count = int(time_dataset.shape[0]) if time_dataset.shape else 0
+        step = _welding_graph_stride(sample_count, WELDING_GRAPH_MAX_POINTS)
+        time_s = _read_h5_dataset_for_graph(
+            time_dataset,
+            WELDING_GRAPH_MAX_POINTS,
+            step=step,
+        )
+
         channels = []
         for key in sorted(name for name in h5_file.keys() if name.startswith("channel_")):
             dataset = h5_file[key]
+            values = _read_h5_dataset_for_graph(
+                dataset,
+                WELDING_GRAPH_MAX_POINTS,
+                step=step,
+            )
+            point_count = min(time_s.size, values.size)
             channels.append(
                 {
                     "key": key,
                     "name": _format_h5_channel_name(dataset, key),
-                    "values": np.array(dataset, dtype=float),
+                    "values": values[:point_count],
                 }
             )
+            time_s = time_s[:point_count]
 
     if not channels:
         raise ValueError("Keine Messkanäle in H5-Datei gefunden.")
 
-    time_s, channels = _downsample_welding_series(time_s, channels, WELDING_GRAPH_MAX_POINTS)
     return {
-        "time_s": time_s.tolist(),
+        "time_s": np.asarray(time_s, dtype=float).tolist(),
         "channels": [
             {
                 "key": channel["key"],
                 "name": channel["name"],
-                "values": channel["values"].tolist(),
+                "values": np.asarray(channel["values"], dtype=float).tolist(),
             }
             for channel in channels
         ],
@@ -1671,27 +1676,6 @@ def _mark_experiment_welded_in_excel(path, experiment_id, h5_filename):
     }
 
 
-def _mark_experiment_analyzed_in_excel(path, experiment_id, analyze_folder):
-    workbook = load_workbook(path)
-    worksheet = workbook.active
-    header_map = _build_excel_header_map(worksheet)
-    row_idx = _find_excel_row_by_id(worksheet, header_map, experiment_id)
-
-    if row_idx is None:
-        raise ValueError("ID nicht gefunden.")
-
-    analyzefolder_col = header_map.get("analyzefolder")
-
-    if analyzefolder_col is not None and analyze_folder is not None:
-        worksheet.cell(row=row_idx, column=analyzefolder_col, value=analyze_folder)
-
-    workbook.save(path)
-    updated_fields = {}
-    if analyze_folder is not None:
-        updated_fields["ANALYZEFOLDER"] = analyze_folder
-    return updated_fields
-
-
 def _is_blank_excel_input(value):
     if value is None:
         return True
@@ -1739,9 +1723,9 @@ def _delete_analyze_folder(folder_name):
     if not safe_folder:
         return None
 
-    folder_path = (ANALYZING_DATA_DIR / safe_folder).resolve()
-    analyzing_root = ANALYZING_DATA_DIR.resolve()
-    if analyzing_root not in folder_path.parents or not folder_path.is_dir():
+    folder_path = (GENERATE_DATA_DIR / safe_folder).resolve()
+    generate_root = GENERATE_DATA_DIR.resolve()
+    if generate_root not in folder_path.parents or not folder_path.is_dir():
         return None
 
     shutil.rmtree(folder_path)
@@ -1749,12 +1733,10 @@ def _delete_analyze_folder(folder_name):
 
 
 def _delete_existing_analyze_folder(experiment_id):
-    try:
-        analyze_folder = _get_experiment_analyze_folder(experiment_id)
-    except ValueError:
-        return None
-
-    return _delete_analyze_folder(analyze_folder)
+    deleted = None
+    for folder_name in _list_analyze_folders_for_experiment(experiment_id):
+        deleted = _delete_analyze_folder(folder_name) or deleted
+    return deleted
 
 
 def _reset_experiment_scan_in_excel(path, experiment_id):
@@ -1768,19 +1750,8 @@ def _reset_experiment_scan_in_excel(path, experiment_id):
 
     scanned_col = header_map.get("scanned")
     jsonfile_col = header_map.get("jsonfile")
-    analyzefolder_col = header_map.get("analyzefolder")
     deleted_file = None
-    deleted_analyze_folder = None
-
-    if analyzefolder_col is not None:
-        analyze_folder = worksheet.cell(row=row_idx, column=analyzefolder_col).value
-        if _has_value(analyze_folder):
-            try:
-                deleted_analyze_folder = _delete_analyze_folder(analyze_folder)
-            except ValueError:
-                deleted_analyze_folder = None
-
-        _clear_excel_cell(worksheet, row_idx, analyzefolder_col)
+    deleted_analyze_folder = _delete_existing_analyze_folder(experiment_id)
 
     if jsonfile_col is not None:
         scan_filename = worksheet.cell(row=row_idx, column=jsonfile_col).value
@@ -1803,7 +1774,6 @@ def _reset_experiment_scan_in_excel(path, experiment_id):
     return {
         "SCANNED": "",
         "JSONFILE": "",
-        "ANALYZEFOLDER": "",
         "deleted_file": deleted_file,
         "deleted_analyze_folder": deleted_analyze_folder,
     }
@@ -1883,7 +1853,8 @@ def _reset_experiment_weld_in_excel(path, experiment_id):
 def inject_nav_context():
     return {
         "load_status": _get_load_status(),
-        "versuchs_path": _get_versuchs_path_display(),
+        "data_path": _get_data_path_display(),
+        "data_path_suggestions": DATA_PATH_SUGGESTIONS,
     }
 
 
@@ -1909,6 +1880,12 @@ def menu():
         table_columns=MENU_TABLE_COLUMNS,
         filter_column=filter_column,
         filter_options=filter_options,
+        steckbrief_weld_columns=MENU_STECKBRIEF_WELD_COLUMNS,
+        steckbrief_scan_columns=MENU_STECKBRIEF_SCAN_COLUMNS,
+        path_id_options=PATH_ID_OPTIONS,
+        existing_ids=sorted(versuchsuebersicht_data["id_index"].keys())
+        if versuchsuebersicht_data
+        else [],
     )
 
 
@@ -1948,217 +1925,6 @@ def scanning():
     )
 
 
-@app.get("/analyzing")
-def analyzing():
-    table_rows = _get_analyzing_table_rows()
-
-    return render_template(
-        "analyzing.html",
-        active_page="analyzing",
-        table_rows=table_rows,
-        table_columns=ANALYZING_TABLE_COLUMNS,
-    )
-
-
-@app.post("/api/analyzing/generate/<experiment_id>")
-def generate_analyzing_data(experiment_id):
-    if versuchsuebersicht_path is None or versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    row = versuchsuebersicht_data["id_index"].get(_normalize_id(experiment_id))
-    if row is None:
-        return jsonify(error="ID nicht gefunden."), 404
-
-    scan_path = None
-    scan_error = None
-    if _experiment_has_valid_scan(experiment_id):
-        scan_path, scan_error = _resolve_scan_path_for_experiment(experiment_id)
-
-    h5_path = None
-    h5_error = None
-    if _experiment_has_valid_weld(experiment_id):
-        h5_path, h5_error = _resolve_h5_path_for_experiment(experiment_id)
-
-    if scan_path is None and h5_path is None:
-        messages = []
-        if scan_error:
-            messages.append(scan_error)
-        if h5_error:
-            messages.append(h5_error)
-        if not messages:
-            messages.append("Für diese ID liegt keine gültige Scan- oder H5-Datei vor.")
-        return jsonify(error=" ".join(messages)), 400
-
-    try:
-        scan_speed_mm_s = None
-        scan_duration_s = None
-        if scan_path is not None:
-            scan_speed_mm_s, scan_duration_s = _get_scan_geometry_from_row(row)
-
-        deleted_analyze_folder = _delete_existing_analyze_folder(experiment_id)
-
-        result = _import_run_analyze().run_analyze(
-            experiment_id,
-            ANALYZING_DATA_DIR,
-            scan_path=scan_path,
-            weld_path=h5_path,
-            weld_config=_build_weld_config(),
-            scan_speed_mm_s=scan_speed_mm_s,
-            scan_duration_s=scan_duration_s,
-        )
-        updated_fields = _mark_experiment_analyzed_in_excel(
-            Path(versuchsuebersicht_path),
-            experiment_id,
-            result.get("analyze_folder"),
-        )
-        _refresh_versuchs_row_cache(experiment_id, updated_fields)
-        result["fields"] = updated_fields
-        result["has_analyze"] = _experiment_has_valid_analyze(experiment_id)
-        if deleted_analyze_folder:
-            result["deleted_analyze_folder"] = deleted_analyze_folder
-        return jsonify(**result)
-    except Exception as exc:
-        return jsonify(error=f"Probendaten konnten nicht generiert werden: {exc}"), 500
-
-
-@app.get("/api/analyzing/<experiment_id>/graph")
-def get_analyzing_graph(experiment_id):
-    if versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    profile_index = request.args.get("profile", default=0, type=int)
-    if profile_index is None or profile_index < 0:
-        return jsonify(error="Profilindex muss >= 0 sein."), 400
-
-    try:
-        analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
-        if error:
-            status = 404 if (
-                error.startswith("Kein Analyse-Ordner")
-                or error.startswith("cropped_scan.json nicht gefunden")
-            ) else 400
-            return jsonify(error=error), status
-
-        graph_data = _load_scanning_profile_graph(analyze_path, profile_index)
-        return jsonify(id=experiment_id, **graph_data)
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen der Analyse-Datei: {exc}"), 500
-
-
-@app.get("/api/analyzing/<experiment_id>/heatmap")
-def get_analyzing_heatmap(experiment_id):
-    if versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    try:
-        analyze_path, error = _resolve_analyze_path_for_experiment(experiment_id)
-        if error:
-            status = 404 if (
-                error.startswith("Kein Analyse-Ordner")
-                or error.startswith("cropped_scan.json nicht gefunden")
-            ) else 400
-            return jsonify(error=error), status
-
-        heatmap_data = _load_analyzing_scan_heatmap(analyze_path)
-        return jsonify(id=experiment_id, **heatmap_data)
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen der Analyse-Heatmap: {exc}"), 500
-
-
-@app.get("/api/analyzing/<experiment_id>/x-profile")
-def get_analyzing_x_profile(experiment_id):
-    if versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    try:
-        profile_path, error = _resolve_analyze_profile_path_for_experiment(
-            experiment_id,
-            ANALYZE_X_PROFILE_FILENAME,
-        )
-        if error:
-            status = 404 if (
-                error.startswith("Kein Analyse-Ordner")
-                or error.startswith(f"{ANALYZE_X_PROFILE_FILENAME} nicht gefunden")
-            ) else 400
-            return jsonify(error=error), status
-
-        graph_data = _load_analyze_profile_graph(profile_path)
-        return jsonify(id=experiment_id, **graph_data)
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_X_PROFILE_FILENAME}: {exc}"), 500
-
-
-@app.get("/api/analyzing/<experiment_id>/y-profile")
-def get_analyzing_y_profile(experiment_id):
-    if versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    try:
-        profile_path, error = _resolve_analyze_profile_path_for_experiment(
-            experiment_id,
-            ANALYZE_Y_PROFILE_FILENAME,
-        )
-        if error:
-            status = 404 if (
-                error.startswith("Kein Analyse-Ordner")
-                or error.startswith(f"{ANALYZE_Y_PROFILE_FILENAME} nicht gefunden")
-            ) else 400
-            return jsonify(error=error), status
-
-        graph_data = _load_analyze_profile_graph(profile_path)
-        return jsonify(id=experiment_id, **graph_data)
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_Y_PROFILE_FILENAME}: {exc}"), 500
-
-
-@app.get("/api/analyzing/<experiment_id>/weld-graph")
-def get_analyzing_weld_graph(experiment_id):
-    if versuchsuebersicht_data is None:
-        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
-
-    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
-        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
-
-    try:
-        analyze_weld_path, error = _resolve_analyze_weld_path_for_experiment(experiment_id)
-        if error:
-            status = 404 if error.startswith("Kein Analyse-Ordner") else 400
-            if error.startswith("cropped_weld.h5 nicht gefunden"):
-                status = 404
-            return jsonify(error=error), status
-
-        analyze_weld_filename = analyze_weld_path.name
-        graph_data = _load_welding_graph_from_h5(analyze_weld_path)
-        return jsonify(id=experiment_id, h5file=analyze_weld_filename, **graph_data)
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen der Analyse-H5-Datei: {exc}"), 500
-
-
 @app.post("/api/load-versuchsuebersicht")
 def load_versuchsuebersicht():
     body = request.get_json(silent=True) or {}
@@ -2168,14 +1934,47 @@ def load_versuchsuebersicht():
         return jsonify(error="Bitte einen Pfad angeben."), 400
 
     path = _resolve_path(path_str)
-    if not path.is_file():
-        return jsonify(error=f"Datei nicht gefunden: {path_str}"), 404
+    if not path.exists():
+        return jsonify(error=f"Pfad nicht gefunden: {path}"), 404
 
     try:
-        result = _load_versuchsuebersicht_from_path(path)
-        return jsonify(success=True, **result)
+        if path.is_dir():
+            result = _load_data_dir(path)
+        elif path.suffix.lower() in EXCEL_SUFFIXES:
+            result = _load_data_dir(path.parent)
+        else:
+            return jsonify(error="Bitte den data-Ordner oder die Versuchsübersicht angeben."), 400
+        return jsonify(success=True, data_dir=str(data_dir), data_path=_get_data_path_display(), **result)
     except Exception as exc:
         return jsonify(error=f"Fehler beim Laden: {exc}"), 500
+
+
+@app.post("/api/versuchsuebersicht/add-id")
+def add_versuchsuebersicht_id():
+    if versuchsuebersicht_path is None or versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    body = request.get_json(silent=True) or {}
+    experiment_id = _normalize_id(body.get("id", ""))
+
+    if not experiment_id or not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    if experiment_id in versuchsuebersicht_data["id_index"]:
+        return jsonify(error="ID existiert bereits."), 409
+
+    try:
+        result = _append_experiment_id_to_excel(Path(versuchsuebersicht_path), experiment_id)
+        _load_versuchsuebersicht_from_path(Path(versuchsuebersicht_path))
+        return jsonify(success=True, **result)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except PermissionError:
+        return jsonify(
+            error="Excel-Datei ist gesperrt. Bitte Versuchsübersicht.xlsx schließen und erneut versuchen."
+        ), 500
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Hinzufügen der ID: {exc}"), 500
 
 
 @app.get("/api/versuchsuebersicht/status")
@@ -2186,6 +1985,7 @@ def versuchsuebersicht_status():
 
     return jsonify(
         loaded=True,
+        data_dir=str(data_dir) if data_dir else None,
         path=versuchsuebersicht_path,
         row_count=len(versuchsuebersicht_data["rows"]),
         column_count=len(versuchsuebersicht_data["columns"]),
@@ -2206,7 +2006,7 @@ def get_welding_data(experiment_id):
         return jsonify(error="ID nicht gefunden."), 404
 
     field_names = list(
-        dict.fromkeys(_flat_welding_param_columns() + WELDING_FORM_COLUMNS)
+        dict.fromkeys(_flat_welding_param_columns() + WELDING_FORM_COLUMNS + ["COUNT"])
     )
     fields = _get_experiment_fields(row, field_names)
 
@@ -2281,6 +2081,7 @@ def start_welding(experiment_id):
 
     try:
         WELDING_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _stop_weld_monitor()
         _set_weld_job(experiment_id, {"status": "running"})
         thread = threading.Thread(
             target=_run_weld_job,
@@ -2291,6 +2092,33 @@ def start_welding(experiment_id):
         return jsonify(success=True, started=True, id=experiment_id, demo_mode=WELD_USE_DEMO)
     except Exception as exc:
         return jsonify(error=f"Schweißen konnte nicht gestartet werden: {exc}"), 500
+
+
+@app.get("/api/welding/monitor")
+def get_welding_monitor():
+    run_weld = _import_run_weld()
+    return jsonify(run_weld.get_weld_monitor_readings())
+
+
+@app.post("/api/welding/abort/<experiment_id>")
+def abort_welding(experiment_id):
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    normalized_id = _normalize_id(experiment_id)
+    job = _get_weld_job(experiment_id)
+    if not job or job.get("status") != "running":
+        return jsonify(error="Kein laufender Schweißvorgang."), 400
+
+    with _weld_jobs_lock:
+        abort_event = _weld_abort_events.get(normalized_id)
+    if abort_event is None:
+        return jsonify(error="Abbruch nicht möglich."), 409
+
+    abort_event.set()
+    run_weld = _import_run_weld()
+    run_weld.end_weld_progress()
+    return jsonify(success=True, aborted=True, id=experiment_id)
 
 
 @app.get("/api/welding/<experiment_id>/weld-status")
@@ -2322,6 +2150,10 @@ def get_welding_status(experiment_id):
         error = job.get("error") or "Schweißen fehlgeschlagen."
         _clear_weld_job(experiment_id)
         return jsonify(running=False, id=experiment_id, error=error)
+
+    if job.get("status") == "aborted":
+        _clear_weld_job(experiment_id)
+        return jsonify(running=False, id=experiment_id, aborted=True)
 
     if job.get("status") == "done":
         payload = dict(job.get("result") or {})
@@ -2410,6 +2242,28 @@ def start_scanning(experiment_id):
         return jsonify(error=f"Scan fehlgeschlagen: {exc}"), 500
 
 
+@app.post("/api/scanning/abort/<experiment_id>")
+def abort_scanning(experiment_id):
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    normalized_id = _normalize_id(experiment_id)
+    job = _get_scan_job(experiment_id)
+    if not job or job.get("status") != "running":
+        return jsonify(error="Kein laufender Scan."), 400
+
+    with _scan_jobs_lock:
+        abort_event = _scan_abort_events.get(normalized_id)
+    if abort_event is None:
+        return jsonify(error="Abbruch nicht möglich."), 409
+
+    abort_event.set()
+    run_scan = _import_run_scan()
+    run_scan.end_scan_progress()
+    run_scan.close_live_profile_preview()
+    return jsonify(success=True, aborted=True, id=experiment_id)
+
+
 @app.get("/api/scanning/<experiment_id>/scan-status")
 def get_scanning_status(experiment_id):
     if not re.fullmatch(r"[A-Z]{3}", experiment_id):
@@ -2426,6 +2280,10 @@ def get_scanning_status(experiment_id):
         error = job.get("error") or "Scan fehlgeschlagen."
         _clear_scan_job(experiment_id)
         return jsonify(running=False, id=experiment_id, error=error)
+
+    if job.get("status") == "aborted":
+        _clear_scan_job(experiment_id)
+        return jsonify(running=False, id=experiment_id, aborted=True)
 
     if job.get("status") == "done":
         payload = dict(job.get("result") or {})
@@ -2475,7 +2333,6 @@ def reset_scanning(experiment_id):
             fields={
                 "SCANNED": updated_fields["SCANNED"],
                 "JSONFILE": updated_fields["JSONFILE"],
-                "ANALYZEFOLDER": updated_fields.get("ANALYZEFOLDER", ""),
             },
             deleted_file=updated_fields.get("deleted_file"),
             deleted_analyze_folder=updated_fields.get("deleted_analyze_folder"),
@@ -2737,11 +2594,13 @@ def static_files(path):
     return send_from_directory(BASE_DIR, path)
 
 
-_try_load_default_versuchsuebersicht()
+_try_load_default_data_dir()
 
 if __name__ == "__main__":
     if SCAN_USE_DEMO:
         print("Scan-Demo-Modus aktiv (SCAN_USE_DEMO=1) – Scans ohne Hardware.")
     if WELD_USE_DEMO:
         print("Schweiß-Demo-Modus aktiv (WELD_USE_DEMO=1) – Schweißen ohne NI-DAQ.")
-    app.run(debug=True, port=5000)
+    _start_weld_monitor()
+    # threaded=True: Monitor-Polling darf Load-Requests nicht blockieren.
+    app.run(debug=True, port=5000, threaded=True)

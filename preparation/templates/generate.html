@@ -1,0 +1,1171 @@
+{% extends "base.html" %}
+
+{% block title %}Generate · preparation{% endblock %}
+
+{% block content %}
+<div class="analyzing-layout">
+  <div class="analyzing-sticky-track">
+  <aside class="analyzing-sidebar" aria-label="Probenauswahl">
+    <div class="menu-table-header">
+      <p class="menu-table-count">{{ table_rows|length }} Einträge mit WELDED und SCANNED</p>
+    </div>
+    <div class="menu-table-wrapper analyzing-table-wrapper">
+      {% if table_rows %}
+      <table class="menu-table analyzing-table" id="analyzing-table">
+        <thead>
+          <tr>
+            <th scope="col" class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  id="analyzing-select-all"
+                  class="analyzing-row-select analyzing-select-all"
+                  aria-label="Alle auswählbaren Einträge auswählen"
+                />
+              </div>
+            </th>
+            {% for column in table_columns %}
+            {% set sort_type = "text" %}
+            {% if column in ["SERIES", "NUMBER"] %}
+            {% set sort_type = "number" %}
+            {% endif %}
+            <th scope="col">
+              <button
+                type="button"
+                class="menu-table-sort"
+                data-sort-index="{{ loop.index0 + 1 }}"
+                data-sort-type="{{ sort_type }}"
+              >
+                <span title="{{ column }}">{{ table_column_labels.get(column, column) }}</span>
+                <span class="menu-table-sort-indicator" aria-hidden="true"></span>
+              </button>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in table_rows %}
+          <tr
+            class="menu-table-row"
+            data-id="{{ row.ID }}"
+            data-has-analyze="{{ '1' if row.has_analyze else '0' }}"
+          >
+            <td class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  class="analyzing-row-select"
+                  aria-label="ID {{ row.ID }} auswählen"
+                />
+              </div>
+            </td>
+            {% for column in table_columns %}
+            <td>{{ row[column] }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="menu-table-empty">Keine Einträge mit WELDED und SCANNED gefunden.</p>
+      {% endif %}
+    </div>
+  </aside>
+  </div>
+
+  <div class="analyzing-sticky-track" id="analyzing-generate-options-sticky-track">
+  <aside
+    class="analyzing-characteristics-sidebar analyzing-weld-controls-sidebar analyzing-correlate-controls-sidebar"
+    id="analyzing-generate-options-sidebar"
+    aria-label="Generate-Auswahl"
+  >
+    <div class="analyzing-correlate-controls-content">
+      {% if scan_generate_keys %}
+      <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
+        <div class="menu-table-header">
+          <p class="menu-table-count">Scan</p>
+        </div>
+        <div class="analyzing-weld-sidebar-toggles" id="analyzing-generate-scan-toggles">
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              id="analyzing-generate-scan-select-all"
+              class="analyzing-generate-scan-select-all"
+              aria-label="Alle Scan-Ausgaben auswählen"
+              checked
+            />
+            <span>Alle auswählen</span>
+          </label>
+          {% for key in scan_generate_keys %}
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              class="analyzing-generate-scan-select"
+              data-generate-scan="{{ key }}"
+              aria-label="{{ key }} generieren"
+              checked
+            />
+            <span title="{{ key }}">{{ key }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if weld_generate_keys %}
+      <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
+        <div class="menu-table-header">
+          <p class="menu-table-count">Weld</p>
+        </div>
+        <div class="analyzing-weld-sidebar-toggles" id="analyzing-generate-weld-toggles">
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              id="analyzing-generate-weld-select-all"
+              class="analyzing-generate-weld-select-all"
+              aria-label="Alle Weld-Ausgaben auswählen"
+              checked
+            />
+            <span>Alle auswählen</span>
+          </label>
+          {% for key in weld_generate_keys %}
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              class="analyzing-generate-weld-select"
+              data-generate-weld="{{ key }}"
+              aria-label="{{ key }} generieren"
+              checked
+            />
+            <span title="{{ key }}">{{ key }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </aside>
+  </div>
+
+  <div
+    id="analyzing-generate-confirm"
+    class="analyzing-modal"
+    hidden
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="analyzing-generate-confirm-title"
+  >
+    <div class="analyzing-modal-backdrop" data-modal-dismiss></div>
+    <div class="analyzing-modal-panel">
+      <h2 id="analyzing-generate-confirm-title" class="analyzing-modal-title">Generate</h2>
+      <p id="analyzing-generate-confirm-text" class="analyzing-modal-text">
+        Für ausgewählte IDs generieren?
+      </p>
+      <div class="analyzing-modal-actions">
+        <button type="button" id="analyzing-generate-confirm-no" class="analyzing-modal-button">
+          Nein
+        </button>
+        <button type="button" id="analyzing-generate-confirm-yes" class="analyzing-modal-button is-primary">
+          Ja
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="analyzing-generate-progress"
+    class="analyzing-modal"
+    hidden
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="analyzing-generate-progress-title"
+  >
+    <div class="analyzing-modal-backdrop"></div>
+    <div class="analyzing-modal-panel analyzing-modal-panel-wide">
+      <h2 id="analyzing-generate-progress-title" class="analyzing-modal-title">Generate läuft</h2>
+      <p id="analyzing-generate-progress-text" class="analyzing-modal-text">Vorbereitung…</p>
+      <div
+        class="analyzing-progress-track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+        id="analyzing-generate-progress-bar"
+      >
+        <div id="analyzing-generate-progress-fill" class="analyzing-progress-fill"></div>
+      </div>
+      <p id="analyzing-generate-progress-eta" class="analyzing-modal-meta">Geschätzte Dauer: –</p>
+      <div class="analyzing-modal-actions">
+        <button type="button" id="analyzing-generate-abort" class="analyzing-modal-button is-danger">
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="analyzing-sticky-track analyzing-sticky-track-panel">
+  <section class="analyzing-graphs-panel" aria-label="Generate">
+    <div class="analyzing-generate-panel">
+      <div id="analyzing-generate-artifact-status" class="analyzing-generate-artifact-status" aria-label="Generierungsstatus">
+        <div class="menu-table-header">
+          <p class="menu-table-count" id="analyzing-generate-artifact-status-title">Generiert</p>
+        </div>
+
+        <div class="analyzing-generate-artifact-columns">
+        {% if scan_generate_keys %}
+        <div class="analyzing-generate-artifact-section">
+          <p class="analyzing-generate-artifact-section-label">Scan</p>
+          <ul class="analyzing-generate-artifact-list">
+            {% for key in scan_generate_keys %}
+            <li class="analyzing-generate-artifact-item" data-artifact-section="scan" data-artifact-key="{{ key }}">
+              <span class="analyzing-generate-artifact-indicator" data-state="none" aria-hidden="true"></span>
+              <span class="analyzing-generate-artifact-label" title="{{ key }}">{{ key }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        {% if weld_generate_keys %}
+        <div class="analyzing-generate-artifact-section">
+          <p class="analyzing-generate-artifact-section-label">Weld</p>
+          <ul class="analyzing-generate-artifact-list">
+            {% for key in weld_generate_keys %}
+            <li class="analyzing-generate-artifact-item" data-artifact-section="weld" data-artifact-key="{{ key }}">
+              <span class="analyzing-generate-artifact-indicator" data-state="none" aria-hidden="true"></span>
+              <span class="analyzing-generate-artifact-label" title="{{ key }}">{{ key }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+        </div>
+
+        <p id="analyzing-generate-artifact-legend" class="analyzing-generate-artifact-legend">
+          <span><span class="analyzing-generate-artifact-indicator is-all" aria-hidden="true"></span> alle IDs</span>
+          <span><span class="analyzing-generate-artifact-indicator is-partial" aria-hidden="true"></span> teilweise</span>
+          <span><span class="analyzing-generate-artifact-indicator is-none" aria-hidden="true"></span> keine</span>
+        </p>
+      </div>
+
+      <div class="analyzing-generate-run-block">
+        <p id="analyzing-generate-eta" class="analyzing-generate-eta">Geschätzte Dauer: –</p>
+        <span id="analyzing-generate-status" class="analyzing-generate-status" aria-live="polite"></span>
+        <button type="button" id="analyzing-generate-button" class="analyzing-generate-button" disabled>
+          Generate
+        </button>
+      </div>
+    </div>
+  </section>
+</div>
+</div>
+<script>
+  (function () {
+    const root = document.getElementById("analyzing-generate-options-sidebar");
+    if (!root) {
+      return;
+    }
+
+    const SCAN_KEYS = {{ scan_generate_keys | tojson }};
+    const WELD_KEYS = {{ weld_generate_keys | tojson }};
+    const STORAGE_KEY = "analyzing-generate-options-v1";
+    const selectAllScan = document.getElementById("analyzing-generate-scan-select-all");
+    const selectAllWeld = document.getElementById("analyzing-generate-weld-select-all");
+
+    function defaultOptions() {
+      return {
+        scan: Object.fromEntries(SCAN_KEYS.map((key) => [key, true])),
+        weld: Object.fromEntries(WELD_KEYS.map((key) => [key, true])),
+      };
+    }
+
+    function getScanCheckboxes() {
+      return Array.from(root.querySelectorAll("input.analyzing-generate-scan-select[data-generate-scan]"));
+    }
+
+    function getWeldCheckboxes() {
+      return Array.from(root.querySelectorAll("input.analyzing-generate-weld-select[data-generate-weld]"));
+    }
+
+    function loadStoredOptions() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          return defaultOptions();
+        }
+        const parsed = JSON.parse(raw);
+        const defaults = defaultOptions();
+        return {
+          scan: { ...defaults.scan, ...(parsed.scan || {}) },
+          weld: { ...defaults.weld, ...(parsed.weld || {}) },
+        };
+      } catch {
+        return defaultOptions();
+      }
+    }
+
+    function readOptionsFromInputs() {
+      const options = defaultOptions();
+      getScanCheckboxes().forEach((checkbox) => {
+        options.scan[checkbox.dataset.generateScan] = checkbox.checked;
+      });
+      getWeldCheckboxes().forEach((checkbox) => {
+        options.weld[checkbox.dataset.generateWeld] = checkbox.checked;
+      });
+      return options;
+    }
+
+    function persistOptions() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(readOptionsFromInputs()));
+    }
+
+    function syncSectionSelectAll(selectAll, checkboxes) {
+      if (!selectAll) {
+        return;
+      }
+
+      selectAll.disabled = checkboxes.length === 0;
+      if (checkboxes.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
+      selectAll.checked = checkedCount === checkboxes.length;
+      selectAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+    }
+
+    function syncSelectAllCheckboxes() {
+      syncSectionSelectAll(selectAllScan, getScanCheckboxes());
+      syncSectionSelectAll(selectAllWeld, getWeldCheckboxes());
+    }
+
+    function applyOptions(options) {
+      getScanCheckboxes().forEach((checkbox) => {
+        checkbox.checked = Boolean(options.scan?.[checkbox.dataset.generateScan]);
+      });
+      getWeldCheckboxes().forEach((checkbox) => {
+        checkbox.checked = Boolean(options.weld?.[checkbox.dataset.generateWeld]);
+      });
+      syncSelectAllCheckboxes();
+    }
+
+    function notifyOptionsChange() {
+      if (typeof window.syncAnalyzingGenerateButton === "function") {
+        window.syncAnalyzingGenerateButton();
+      }
+    }
+
+    window.getGenerateOptions = function () {
+      return readOptionsFromInputs();
+    };
+
+    window.hasGenerateOptionsSelected = function () {
+      const options = readOptionsFromInputs();
+      const scanSelected = Object.values(options.scan || {}).some(Boolean);
+      const weldSelected = Object.values(options.weld || {}).some(Boolean);
+      return scanSelected || weldSelected;
+    };
+
+    getScanCheckboxes().forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        syncSelectAllCheckboxes();
+        persistOptions();
+        notifyOptionsChange();
+      });
+    });
+
+    getWeldCheckboxes().forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        syncSelectAllCheckboxes();
+        persistOptions();
+        notifyOptionsChange();
+      });
+    });
+
+    selectAllScan?.addEventListener("change", () => {
+      const checked = selectAllScan.checked;
+      getScanCheckboxes().forEach((checkbox) => {
+        checkbox.checked = checked;
+      });
+      selectAllScan.indeterminate = false;
+      persistOptions();
+      notifyOptionsChange();
+    });
+
+    selectAllWeld?.addEventListener("change", () => {
+      const checked = selectAllWeld.checked;
+      getWeldCheckboxes().forEach((checkbox) => {
+        checkbox.checked = checked;
+      });
+      selectAllWeld.indeterminate = false;
+      persistOptions();
+      notifyOptionsChange();
+    });
+
+    applyOptions(loadStoredOptions());
+    notifyOptionsChange();
+  })();
+</script>
+<script>
+  if (sessionStorage.getItem("versuchs-data-changed")) {
+    sessionStorage.removeItem("versuchs-data-changed");
+    window.location.reload();
+  }
+
+  const analyzingTable = document.getElementById("analyzing-table");
+
+  if (analyzingTable) {
+    const tbody = analyzingTable.querySelector("tbody");
+    const sortButtons = analyzingTable.querySelectorAll(".menu-table-sort");
+    let activeIndex = -1;
+    let ascending = true;
+
+    function compareValues(a, b, type) {
+      if (type === "number") {
+        const numA = Number.parseFloat(a);
+        const numB = Number.parseFloat(b);
+
+        if (Number.isNaN(numA) && Number.isNaN(numB)) {
+          return 0;
+        }
+        if (Number.isNaN(numA)) {
+          return 1;
+        }
+        if (Number.isNaN(numB)) {
+          return -1;
+        }
+
+        return numA - numB;
+      }
+
+      if (type === "date") {
+        const timeA = Date.parse(a);
+        const timeB = Date.parse(b);
+
+        if (Number.isNaN(timeA) && Number.isNaN(timeB)) {
+          return 0;
+        }
+        if (Number.isNaN(timeA)) {
+          return 1;
+        }
+        if (Number.isNaN(timeB)) {
+          return -1;
+        }
+
+        return timeA - timeB;
+      }
+
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    }
+
+    function updateIndicators() {
+      sortButtons.forEach((button) => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const indicator = button.querySelector(".menu-table-sort-indicator");
+        const isActive = index === activeIndex;
+
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-sort", isActive ? (ascending ? "ascending" : "descending") : "none");
+        indicator.textContent = isActive ? (ascending ? "▲" : "▼") : "";
+      });
+    }
+
+    function sortByColumn(index, type) {
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+
+      rows.sort((rowA, rowB) => {
+        const valueA = rowA.children[index]?.textContent.trim() ?? "";
+        const valueB = rowB.children[index]?.textContent.trim() ?? "";
+        const result = compareValues(valueA, valueB, type);
+        return ascending ? result : -result;
+      });
+
+      rows.forEach((row) => tbody.appendChild(row));
+    }
+
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const type = button.dataset.sortType;
+
+        if (activeIndex === index) {
+          ascending = !ascending;
+        } else {
+          activeIndex = index;
+          ascending = true;
+        }
+
+        sortByColumn(index, type);
+        updateIndicators();
+      });
+    });
+
+    const ANALYZING_SELECTION_STORAGE_KEY = "analyzing-selected-ids";
+
+    function loadStoredSelections() {
+      try {
+        const raw = localStorage.getItem(ANALYZING_SELECTION_STORAGE_KEY);
+        if (!raw) {
+          return new Set();
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+          return new Set();
+        }
+
+        return new Set(
+          parsed
+            .map((id) => String(id).trim().toUpperCase())
+            .filter((id) => id.length === 3),
+        );
+      } catch {
+        return new Set();
+      }
+    }
+
+    function getSelectedAnalyzingIds() {
+      return getSelectableCheckboxes()
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.closest(".menu-table-row")?.dataset.id)
+        .filter(Boolean)
+        .map((id) => id.trim().toUpperCase())
+        .filter((id) => id.length === 3);
+    }
+
+    function persistCheckboxSelections() {
+      localStorage.setItem(
+        ANALYZING_SELECTION_STORAGE_KEY,
+        JSON.stringify(getSelectedAnalyzingIds()),
+      );
+    }
+
+    function restoreCheckboxSelections() {
+      const stored = loadStoredSelections();
+
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        const checkbox = row.querySelector(".analyzing-row-select");
+        if (!checkbox || checkbox.disabled) {
+          return;
+        }
+
+        checkbox.checked = stored.has(row.dataset.id);
+      });
+
+      syncSelectAllCheckbox();
+    }
+
+    function getSelectableCheckboxes() {
+      return Array.from(tbody.querySelectorAll(".analyzing-row-select:not(:disabled)"));
+    }
+
+    function rowHasAnalyze(row) {
+      return row?.dataset.hasAnalyze === "1";
+    }
+
+    function syncCheckboxAvailabilityForView() {
+      const analyzeOnly = false;
+      let changed = false;
+
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        const checkbox = row.querySelector(".analyzing-row-select");
+        if (!checkbox) {
+          return;
+        }
+
+        const allow = !analyzeOnly || rowHasAnalyze(row);
+        const nextDisabled = !allow;
+        if (checkbox.disabled !== nextDisabled) {
+          changed = true;
+        }
+        checkbox.disabled = nextDisabled;
+        if (nextDisabled && checkbox.checked) {
+          checkbox.checked = false;
+          changed = true;
+        }
+      });
+
+      syncSelectAllCheckbox();
+      if (changed) {
+        persistCheckboxSelections();
+      }
+      notifySelectionChange();
+    }
+
+    function syncSelectAllCheckbox() {
+      const selectAll = document.getElementById("analyzing-select-all");
+      if (!selectAll) {
+        return;
+      }
+
+      const selectable = getSelectableCheckboxes();
+      selectAll.disabled = selectable.length === 0;
+
+      if (selectable.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = selectable.filter((checkbox) => checkbox.checked).length;
+      selectAll.checked = checkedCount === selectable.length;
+      selectAll.indeterminate = checkedCount > 0 && checkedCount < selectable.length;
+    }
+
+    function notifySelectionChange() {
+      if (typeof window.syncAnalyzingGenerateButton === "function") {
+        window.syncAnalyzingGenerateButton();
+      }
+      if (typeof window.refreshGenerateArtifactStatus === "function") {
+        window.refreshGenerateArtifactStatus();
+      }
+    }
+
+    function highlightSelectedRow() {
+      const currentId = document.getElementById("welding-id")?.value;
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.id === currentId);
+      });
+    }
+
+    function updateRowAnalyzeState(id, hasAnalyze) {
+      const row = tbody?.querySelector(`.menu-table-row[data-id="${id}"]`);
+      if (!row) {
+        return;
+      }
+
+      row.dataset.hasAnalyze = hasAnalyze ? "1" : "0";
+
+    }
+
+    window.getSelectedAnalyzingIds = getSelectedAnalyzingIds;
+    window.updateAnalyzingRowState = updateRowAnalyzeState;
+    window.syncAnalyzingCheckboxAvailability = syncCheckboxAvailabilityForView;
+
+    const selectAllCheckbox = document.getElementById("analyzing-select-all");
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      selectAllCheckbox.addEventListener("change", () => {
+        const checked = selectAllCheckbox.checked;
+        getSelectableCheckboxes().forEach((checkbox) => {
+          checkbox.checked = checked;
+        });
+        selectAllCheckbox.indeterminate = false;
+        persistCheckboxSelections();
+        notifySelectionChange();
+      });
+    }
+
+    tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+      const checkbox = row.querySelector(".analyzing-row-select");
+      if (checkbox) {
+        checkbox.addEventListener("click", (event) => {
+          event.stopPropagation();
+        });
+
+        checkbox.addEventListener("change", () => {
+          syncSelectAllCheckbox();
+          persistCheckboxSelections();
+          notifySelectionChange();
+        });
+      }
+
+      row.addEventListener("click", () => {
+        const id = row.dataset.id;
+        if (!id || !window.setExperimentId) {
+          return;
+        }
+
+        window.setExperimentId(id);
+        highlightSelectedRow();
+      });
+    });
+
+    document.getElementById("welding-id")?.addEventListener("id-change", highlightSelectedRow);
+    highlightSelectedRow();
+    restoreCheckboxSelections();
+    notifySelectionChange();
+  }
+
+  (function () {
+    const generateButton = document.getElementById("analyzing-generate-button");
+    const statusEl = document.getElementById("analyzing-generate-status");
+    const etaEl = document.getElementById("analyzing-generate-eta");
+    const confirmModal = document.getElementById("analyzing-generate-confirm");
+    const confirmText = document.getElementById("analyzing-generate-confirm-text");
+    const confirmYes = document.getElementById("analyzing-generate-confirm-yes");
+    const confirmNo = document.getElementById("analyzing-generate-confirm-no");
+    const progressModal = document.getElementById("analyzing-generate-progress");
+    const progressText = document.getElementById("analyzing-generate-progress-text");
+    const progressEta = document.getElementById("analyzing-generate-progress-eta");
+    const progressBar = document.getElementById("analyzing-generate-progress-bar");
+    const progressFill = document.getElementById("analyzing-generate-progress-fill");
+    const abortButton = document.getElementById("analyzing-generate-abort");
+
+    let isGenerating = false;
+    let abortRequested = false;
+    let pendingIds = [];
+
+    // Kalibriert an AFI (Scan) und AFI/BEQ (Weld), kumulative Schrittdauern, Aug 2026
+    const GENERATE_OPTION_SECONDS = {
+      scan: {
+        cropped_scan: 0.75,
+        filtered: 0.83,
+        x_profile: 0.08,
+        y_profile: 0.05,
+        characteristics: 0.06,
+      },
+      weld: {
+        cropped: 0.74,
+        power: 0.03,
+        grenzen: 2.7,
+        char_graphen: 71,
+        characteristics: 1.8,
+      },
+    };
+    const GENERATE_PER_SIDE_OVERHEAD_S = 0.35;
+
+    function getGenerateOptionsSelection() {
+      if (typeof window.getGenerateOptions === "function") {
+        return window.getGenerateOptions();
+      }
+      return { scan: {}, weld: {} };
+    }
+
+    function sumSelectedOptionSeconds(sectionOptions, weights) {
+      return Object.entries(sectionOptions || {}).reduce((total, [key, selected]) => {
+        if (!selected) {
+          return total;
+        }
+        return total + (weights[key] ?? 0.5);
+      }, 0);
+    }
+
+    function estimateGenerateSecondsPerId(options = getGenerateOptionsSelection()) {
+      const scanSelected = Object.values(options.scan || {}).some(Boolean);
+      const weldSelected = Object.values(options.weld || {}).some(Boolean);
+      const scanSeconds =
+        GENERATE_PER_SIDE_OVERHEAD_S
+        + sumSelectedOptionSeconds(options.scan, GENERATE_OPTION_SECONDS.scan);
+      const weldSeconds =
+        GENERATE_PER_SIDE_OVERHEAD_S
+        + sumSelectedOptionSeconds(options.weld, GENERATE_OPTION_SECONDS.weld);
+
+      if (scanSelected && weldSelected) {
+        return Math.max(scanSeconds, weldSeconds);
+      }
+      if (scanSelected) {
+        return scanSeconds;
+      }
+      if (weldSelected) {
+        return weldSeconds;
+      }
+      return 0;
+    }
+
+    function estimateGenerateTotalSeconds(
+      ids = getSelectedIds(),
+      options = getGenerateOptionsSelection(),
+    ) {
+      const idCount = Array.isArray(ids) ? ids.length : 0;
+      if (idCount <= 0) {
+        return 0;
+      }
+      return idCount * estimateGenerateSecondsPerId(options);
+    }
+
+    window.estimateGenerateSecondsPerId = estimateGenerateSecondsPerId;
+    window.estimateGenerateTotalSeconds = estimateGenerateTotalSeconds;
+
+    function setStatus(message, type = "") {
+      if (!statusEl) {
+        return;
+      }
+
+      statusEl.textContent = message;
+      statusEl.className = type
+        ? `analyzing-generate-status ${type}`
+        : "analyzing-generate-status";
+    }
+
+    function getSelectedIds() {
+      if (typeof window.getSelectedAnalyzingIds === "function") {
+        return window.getSelectedAnalyzingIds();
+      }
+      return [];
+    }
+
+    function syncGenerateEta() {
+      if (!etaEl) {
+        return;
+      }
+
+      const ids = getSelectedIds();
+      const options = getGenerateOptionsSelection();
+      const hasOptions =
+        typeof window.hasGenerateOptionsSelected !== "function"
+        || window.hasGenerateOptionsSelected();
+
+      if (ids.length === 0 || !hasOptions || isGenerating) {
+        etaEl.textContent = "Geschätzte Dauer: –";
+        return;
+      }
+
+      const totalSeconds = estimateGenerateTotalSeconds(ids, options);
+      const perIdSeconds = estimateGenerateSecondsPerId(options);
+      const durationText = formatDuration(totalSeconds);
+      const idLabel = ids.length === 1 ? "1 ID" : `${ids.length} IDs`;
+      etaEl.textContent =
+        `Geschätzte Dauer: ca. ${durationText} (${idLabel}, ~${formatDuration(perIdSeconds)}/ID)`;
+    }
+
+    function syncGenerateButton() {
+      if (!generateButton) {
+        return;
+      }
+
+      const hasIds = getSelectedIds().length > 0;
+      const hasOptions =
+        typeof window.hasGenerateOptionsSelected !== "function"
+        || window.hasGenerateOptionsSelected();
+      generateButton.disabled = isGenerating || !hasIds || !hasOptions;
+      syncGenerateEta();
+    }
+
+    window.syncAnalyzingGenerateButton = syncGenerateButton;
+
+    function setModalOpen(modal, open) {
+      if (!modal) {
+        return;
+      }
+      modal.hidden = !open;
+    }
+
+    function formatDuration(totalSeconds) {
+      const seconds = Math.max(0, Math.ceil(totalSeconds));
+      if (seconds < 60) {
+        return `${seconds} s`;
+      }
+
+      const minutes = Math.floor(seconds / 60);
+      const rest = seconds % 60;
+      return `${minutes} min ${String(rest).padStart(2, "0")} s`;
+    }
+
+    function updateProgressUi({ index, total, currentId, avgSeconds, aborting }) {
+      const completed = Math.max(0, index);
+      const percent = total > 0 ? Math.round((100 * completed) / total) : 0;
+      const remaining = Math.max(0, total - completed);
+      const etaSeconds = remaining * avgSeconds;
+
+      if (progressText) {
+        if (aborting && currentId) {
+          progressText.textContent =
+            `Abbruch nach ${currentId}… (${completed}/${total} fertig)`;
+        } else if (currentId) {
+          progressText.textContent =
+            `Generiere ${currentId} (${Math.min(completed + 1, total)}/${total})`;
+        } else {
+          progressText.textContent = `${completed}/${total} fertig`;
+        }
+      }
+
+      if (progressEta) {
+        progressEta.textContent = aborting
+          ? "Aktuelle ID wird noch abgeschlossen…"
+          : `Geschätzte Restdauer: ${formatDuration(etaSeconds)}`;
+      }
+
+      if (progressFill) {
+        progressFill.style.width = `${percent}%`;
+      }
+
+      if (progressBar) {
+        progressBar.setAttribute("aria-valuenow", String(percent));
+      }
+    }
+
+    function closeConfirmModal() {
+      setModalOpen(confirmModal, false);
+      pendingIds = [];
+    }
+
+    function openConfirmModal() {
+      const selectedIds = getSelectedIds();
+      if (isGenerating || selectedIds.length === 0) {
+        return;
+      }
+
+      pendingIds = selectedIds.slice();
+      if (confirmText) {
+        const count = pendingIds.length;
+        confirmText.textContent =
+          count === 1
+            ? `Für 1 ID generieren?`
+            : `Für ${count} IDs generieren?`;
+      }
+      setModalOpen(confirmModal, true);
+      confirmYes?.focus();
+    }
+
+    async function runBatchGenerate(ids) {
+      if (isGenerating || ids.length === 0) {
+        return;
+      }
+
+      isGenerating = true;
+      abortRequested = false;
+      syncGenerateButton();
+      setModalOpen(confirmModal, false);
+      setModalOpen(progressModal, true);
+      if (abortButton) {
+        abortButton.disabled = false;
+        abortButton.textContent = "Abbrechen";
+      }
+
+      const durations = [];
+      const batchOptions = getGenerateOptionsSelection();
+      let avgSeconds = estimateGenerateSecondsPerId(batchOptions) || 1;
+      let successCount = 0;
+      let errorCount = 0;
+      let stoppedEarly = false;
+      const generatedIds = [];
+
+      setStatus("Batch-Generierung läuft…", "loading");
+      updateProgressUi({
+        index: 0,
+        total: ids.length,
+        currentId: ids[0],
+        avgSeconds,
+        aborting: false,
+      });
+
+      for (let index = 0; index < ids.length; index += 1) {
+        if (abortRequested) {
+          stoppedEarly = true;
+          break;
+        }
+
+        const id = ids[index];
+        updateProgressUi({
+          index,
+          total: ids.length,
+          currentId: id,
+          avgSeconds,
+          aborting: abortRequested,
+        });
+
+        const started = performance.now();
+        try {
+          const response = await fetch(`/api/generate/${encodeURIComponent(id)}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(window.getGenerateOptions?.() ?? {}),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            errorCount += 1;
+            setStatus(`${id}: ${data.error || "Fehler."}`, "error");
+          } else {
+            successCount += 1;
+            generatedIds.push(id);
+            if (window.updateAnalyzingRowState) {
+              window.updateAnalyzingRowState(id, Boolean(data.has_analyze));
+            }
+          }
+        } catch {
+          errorCount += 1;
+          setStatus(`${id}: Verbindungsfehler.`, "error");
+        }
+
+        const elapsedSeconds = (performance.now() - started) / 1000;
+        durations.push(elapsedSeconds);
+        avgSeconds = durations.reduce((sum, value) => sum + value, 0) / durations.length;
+
+        updateProgressUi({
+          index: index + 1,
+          total: ids.length,
+          currentId: index + 1 < ids.length ? ids[index + 1] : null,
+          avgSeconds,
+          aborting: abortRequested,
+        });
+
+        if (abortRequested) {
+          if (index + 1 < ids.length) {
+            stoppedEarly = true;
+          }
+          break;
+        }
+      }
+
+      setModalOpen(progressModal, false);
+
+      if (stoppedEarly) {
+        setStatus(
+          `Abgebrochen nach ${successCount} von ${ids.length}` +
+            (errorCount ? ` (${errorCount} Fehler)` : "") +
+            ".",
+          errorCount ? "error" : "success",
+        );
+      } else if (errorCount && successCount) {
+        setStatus(`${successCount} ok, ${errorCount} Fehler.`, "error");
+      } else if (errorCount) {
+        setStatus(`Fehler bei ${errorCount} ID(s).`, "error");
+      } else {
+        setStatus(
+          successCount === 1
+            ? "Analyse gespeichert."
+            : `${successCount} Analysen gespeichert.`,
+          "success",
+        );
+      }
+
+      isGenerating = false;
+      abortRequested = false;
+      pendingIds = [];
+      syncGenerateButton();
+      if (typeof window.refreshGenerateArtifactStatus === "function") {
+        window.refreshGenerateArtifactStatus();
+      }
+    }
+
+    function requestAbort() {
+      if (!isGenerating || abortRequested) {
+        return;
+      }
+
+      abortRequested = true;
+      if (abortButton) {
+        abortButton.disabled = true;
+        abortButton.textContent = "Wird beendet…";
+      }
+      if (progressEta) {
+        progressEta.textContent = "Aktuelle ID wird noch abgeschlossen…";
+      }
+    }
+
+    if (generateButton) {
+      generateButton.addEventListener("click", openConfirmModal);
+    }
+
+    confirmYes?.addEventListener("click", () => {
+      const ids = pendingIds.slice();
+      pendingIds = [];
+      void runBatchGenerate(ids);
+    });
+
+    confirmNo?.addEventListener("click", closeConfirmModal);
+    confirmModal?.querySelector("[data-modal-dismiss]")?.addEventListener("click", closeConfirmModal);
+
+    abortButton?.addEventListener("click", requestAbort);
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (confirmModal && !confirmModal.hidden) {
+        closeConfirmModal();
+      }
+    });
+
+    syncGenerateButton();
+  })();
+
+  (function () {
+    const statusRoot = document.getElementById("analyzing-generate-artifact-status");
+    if (!statusRoot) {
+      return;
+    }
+
+    const titleEl = document.getElementById("analyzing-generate-artifact-status-title");
+    const items = Array.from(statusRoot.querySelectorAll(".analyzing-generate-artifact-item"));
+    let refreshRequestId = 0;
+
+    function setIndicatorState(state) {
+      return ["none", "partial", "all"].includes(state) ? state : "none";
+    }
+
+    function applyStatusData(data) {
+      const idCount = Number(data?.id_count) || 0;
+      if (titleEl) {
+        titleEl.textContent =
+          idCount === 0
+            ? "Generiert"
+            : idCount === 1
+              ? "Generiert · 1 ID"
+              : `Generiert · ${idCount} IDs`;
+      }
+
+      items.forEach((item) => {
+        const section = item.dataset.artifactSection;
+        const key = item.dataset.artifactKey;
+        const indicator = item.querySelector(".analyzing-generate-artifact-indicator");
+        const label = item.querySelector(".analyzing-generate-artifact-label");
+        const state = setIndicatorState(data?.[section]?.[key]);
+        if (indicator) {
+          indicator.dataset.state = state;
+        }
+        if (label) {
+          const stateLabel =
+            state === "all" ? "alle IDs" : state === "partial" ? "teilweise" : "keine ID";
+          label.setAttribute(
+            "aria-label",
+            idCount > 0 ? `${key}: ${stateLabel}` : `${key}: keine Auswahl`,
+          );
+        }
+      });
+    }
+
+    function resetStatusIndicators() {
+      applyStatusData({ id_count: 0, scan: {}, weld: {} });
+    }
+
+    async function refreshGenerateArtifactStatus() {
+      const ids =
+        typeof window.getSelectedAnalyzingIds === "function"
+          ? window.getSelectedAnalyzingIds()
+          : [];
+
+      if (ids.length === 0) {
+        resetStatusIndicators();
+        return;
+      }
+
+      const requestId = ++refreshRequestId;
+      try {
+        const response = await fetch("/api/generate/status", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ids }),
+        });
+        const data = await response.json();
+        if (requestId !== refreshRequestId) {
+          return;
+        }
+        if (!response.ok) {
+          resetStatusIndicators();
+          return;
+        }
+        applyStatusData(data);
+      } catch {
+        if (requestId === refreshRequestId) {
+          resetStatusIndicators();
+        }
+      }
+    }
+
+    window.refreshGenerateArtifactStatus = refreshGenerateArtifactStatus;
+    refreshGenerateArtifactStatus();
+  })();
+
+</script>
+{% endblock %}

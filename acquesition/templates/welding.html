@@ -99,6 +99,9 @@
   <button type="button" id="welding-action-button" class="welding-action-button" disabled>
     START WELDING
   </button>
+  <button type="button" id="welding-abort-button" class="welding-action-button welding-action-button-abort" hidden>
+    ABBRECHEN
+  </button>
   <button type="button" id="welding-reset-button" class="welding-action-button welding-action-button-compact" disabled>
     WELD ZURÜCKSETZEN
   </button>
@@ -108,7 +111,7 @@
   <div class="welding-graph-header">
     <h2 class="welding-graph-title">Messdaten</h2>
     <div class="welding-graph-header-right">
-      <div id="welding-live-readings" class="welding-live-readings" hidden>
+      <div id="welding-live-readings" class="welding-live-readings">
         <span class="welding-live-reading welding-live-reading-current">
           Strom <strong id="welding-live-current">—</strong> A
         </span>
@@ -131,6 +134,7 @@
   const pathImage = document.getElementById("welding-path-image");
   const pathImagePlaceholder = document.getElementById("welding-path-placeholder");
   const weldingActionButton = document.getElementById("welding-action-button");
+  const weldingAbortButton = document.getElementById("welding-abort-button");
   const weldingResetButton = document.getElementById("welding-reset-button");
   const graphStatusEl = document.getElementById("welding-graph-status");
   const graphCanvas = document.getElementById("welding-graph-canvas");
@@ -145,9 +149,12 @@
   let liveWeldPlotSince = 0;
   let isLoadingFields = false;
   let isStartingWeld = false;
+  let isAbortingWeld = false;
   let isResettingWeld = false;
   let currentIsWelded = false;
   let scanDurationAutoActive = false;
+  let idleMonitorInterval = null;
+  const IDLE_MONITOR_POLL_MS = 500;
 
   function formatTooltipNumber(value) {
     if (value == null || Number.isNaN(Number(value))) {
@@ -320,7 +327,40 @@
 
   function clearLiveReadings() {
     updateLiveReadings(null, null);
-    setLiveReadingsVisible(false);
+  }
+
+  async function fetchIdleMonitorReadings() {
+    if (isStartingWeld) {
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/welding/monitor");
+      const data = await response.json();
+      if (!response.ok || isStartingWeld) {
+        return;
+      }
+      updateLiveReadings(data.current_a, data.voltage_v);
+    } catch {
+      // ignore transient monitor errors
+    }
+  }
+
+  function startIdleMonitorPoll() {
+    if (idleMonitorInterval) {
+      return;
+    }
+    setLiveReadingsVisible(true);
+    fetchIdleMonitorReadings();
+    idleMonitorInterval = setInterval(fetchIdleMonitorReadings, IDLE_MONITOR_POLL_MS);
+  }
+
+  function stopIdleMonitorPoll() {
+    if (!idleMonitorInterval) {
+      return;
+    }
+    clearInterval(idleMonitorInterval);
+    idleMonitorInterval = null;
   }
 
   function buildWeldingChartScales() {
@@ -468,6 +508,7 @@
     liveWeldPlotSince = 0;
     setLiveReadingsVisible(true);
     updateLiveReadings(null, null);
+    destroyWeldingChart();
     ensureLiveWeldingChart();
     setGraphStatus("Live-Aufnahme...", "loading");
   }
@@ -667,8 +708,10 @@
     currentIsWelded = Boolean(isWelded);
     const id = idInput?.value ?? "";
     const hasValidId = id.length === 3;
+    const weldRunning = isStartingWeld;
 
     if (weldingActionButton) {
+      weldingActionButton.hidden = weldRunning;
       weldingActionButton.disabled = (
         !hasValidId
         || currentIsWelded
@@ -676,6 +719,11 @@
         || isResettingWeld
         || isLoadingFields
       );
+    }
+
+    if (weldingAbortButton) {
+      weldingAbortButton.hidden = !weldRunning;
+      weldingAbortButton.disabled = !weldRunning || isAbortingWeld;
     }
 
     if (weldingResetButton) {
@@ -817,6 +865,10 @@
         throw new Error(data.error);
       }
 
+      if (data.aborted) {
+        return { aborted: true };
+      }
+
       if (data.success || data.h5_file) {
         return data;
       }
@@ -824,6 +876,35 @@
       await new Promise((resolve) => {
         setTimeout(resolve, pollIntervalMs);
       });
+    }
+  }
+
+  async function abortWelding() {
+    const id = idInput?.value ?? "";
+    if (!isStartingWeld || id.length !== 3) {
+      return;
+    }
+
+    isAbortingWeld = true;
+    liveWeldPlotSince = 0;
+    clearLiveReadings();
+    destroyWeldingChart();
+    syncWeldingActionButtons();
+    setStatus("Abbruch wird angefordert...", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/abort/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setStatus(data.error || "Abbruch fehlgeschlagen.", "error");
+      }
+    } catch {
+      setStatus("Verbindungsfehler.", "error");
+    } finally {
+      isAbortingWeld = false;
+      syncWeldingActionButtons();
     }
   }
 
@@ -839,6 +920,7 @@
     }
 
     isStartingWeld = true;
+    stopIdleMonitorPoll();
     setStatus("Schweißen wird gestartet...", "loading");
     resetLiveWeldingDisplay();
     syncWeldingActionButtons();
@@ -858,6 +940,16 @@
 
       const result = await pollWeldStatus(id);
 
+      if (result.aborted) {
+        liveWeldPlotSince = 0;
+        clearLiveReadings();
+        destroyWeldingChart();
+        syncWeldingActionButtons(false);
+        setStatus("Schweißen abgebrochen.", "");
+        setGraphStatus("", "");
+        return;
+      }
+
       syncWeldingActionButtons(true);
       const modeHint = result.demo_mode ? " (Demo)" : "";
       setStatus(`Schweißen gespeichert: ${result.h5_file}${modeHint}`, "success");
@@ -871,6 +963,7 @@
     } finally {
       isStartingWeld = false;
       syncWeldingActionButtons();
+      startIdleMonitorPoll();
     }
   }
 
@@ -891,7 +984,7 @@
     }
 
     const confirmed = window.confirm(
-      `Schweißen für ID ${id} wirklich zurücksetzen?\n\nWELDED und H5FILE werden in Excel geleert und die H5-Datei aus data/welding gelöscht.`
+      `Schweißen für ID ${id} wirklich zurücksetzen?\n\nWELDED und H5FILE werden in Excel geleert und die H5-Datei aus data/acquesition/welding gelöscht.`
     );
     if (!confirmed) {
       return;
@@ -945,6 +1038,10 @@
     weldingActionButton.addEventListener("click", startWelding);
   }
 
+  if (weldingAbortButton) {
+    weldingAbortButton.addEventListener("click", abortWelding);
+  }
+
   if (weldingResetButton) {
     weldingResetButton.addEventListener("click", resetWelding);
   }
@@ -961,5 +1058,7 @@
       field.addEventListener("blur", saveWeldingFields);
     }
   });
+
+  startIdleMonitorPoll();
 </script>
 {% endblock %}

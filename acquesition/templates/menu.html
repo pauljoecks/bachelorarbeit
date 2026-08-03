@@ -3,58 +3,173 @@
 {% block title %}menu · bachelorarbeit{% endblock %}
 
 {% block content %}
-<div class="menu-table-header">
-  {% if filter_options %}
-  <div class="menu-row-filter">
-    <label class="menu-row-filter-label" for="row-filter-column">Filter</label>
-    <select id="row-filter-column" class="menu-row-filter-select">
-      {% for column in filter_options %}
-      <option value="{{ column }}" {% if column == filter_column %}selected{% endif %}>{{ column }}</option>
-      {% endfor %}
-    </select>
+<div class="menu-page">
+  <div class="menu-table-header">
+    <div class="menu-table-header-left">
+      {% if filter_options %}
+      <div class="menu-row-filter">
+        <label class="menu-row-filter-label" for="row-filter-column">Filter</label>
+        <select id="row-filter-column" class="menu-row-filter-select">
+          {% for column in filter_options %}
+          <option value="{{ column }}" {% if column == filter_column %}selected{% endif %}>{{ column }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <button type="button" id="add-id-button" class="menu-add-id-button" disabled>
+        ID hinzufügen
+      </button>
+      <span id="add-id-status" class="menu-add-id-status" aria-live="polite"></span>
+    </div>
+    <p class="menu-table-count">{{ table_rows|length }} Einträge mit ausgefüllter Spalte „{{ filter_column }}“</p>
   </div>
-  {% endif %}
-  <p class="menu-table-count">{{ table_rows|length }} Einträge mit ausgefüllter Spalte „{{ filter_column }}“</p>
-</div>
-<div class="menu-table-wrapper">
-  {% if table_rows %}
-  <table class="menu-table" id="menu-table">
-    <thead>
-      <tr>
-        {% for column in table_columns %}
-        {% set sort_type = "text" %}
-        {% if column in ["COUNT", "SERIES", "NUMBER"] %}
-        {% set sort_type = "number" %}
-        {% elif column in ["WELDED", "SCANNED"] %}
-        {% set sort_type = "date" %}
-        {% endif %}
-        <th scope="col">
-          <button
-            type="button"
-            class="menu-table-sort"
-            data-sort-index="{{ loop.index0 }}"
-            data-sort-type="{{ sort_type }}"
-          >
-            <span>{{ column }}</span>
-            <span class="menu-table-sort-indicator" aria-hidden="true"></span>
-          </button>
-        </th>
-        {% endfor %}
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in table_rows %}
-      <tr class="menu-table-row" data-id="{{ row.ID }}">
-        {% for column in table_columns %}
-        <td>{{ row[column] }}</td>
-        {% endfor %}
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="menu-table-empty">Keine Einträge mit WELDED-Datum gefunden.</p>
-  {% endif %}
+
+  <div class="menu-body">
+    <div class="menu-table-wrapper">
+      {% if table_rows %}
+      <table class="menu-table" id="menu-table">
+        <colgroup>
+          <col span="1" style="width:81px">
+          <col span="1" style="width:56px">
+          <col span="1" style="width:179px">
+          <col span="1" style="width:179px">
+          <col span="1" style="width:89px">
+          <col span="1" style="width:89px">
+          <col span="1" style="width:300px">
+        </colgroup>
+        <thead>
+          <tr>
+            {% for column in table_columns %}
+            {% set sort_type = "text" %}
+            {% if column in ["COUNT", "SERIES", "NUMBER"] %}
+            {% set sort_type = "number" %}
+            {% elif column in ["WELDED", "SCANNED"] %}
+            {% set sort_type = "date" %}
+            {% endif %}
+            <th scope="col">
+              <button
+                type="button"
+                class="menu-table-sort"
+                data-sort-index="{{ loop.index0 }}"
+                data-sort-type="{{ sort_type }}"
+              >
+                <span>{{ column }}</span>
+                <span class="menu-table-sort-indicator" aria-hidden="true"></span>
+              </button>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in table_rows %}
+          <tr class="menu-table-row" data-id="{{ row.ID }}">
+            {% for column in table_columns %}
+            <td{% if column == "COMMENT" %} data-column="COMMENT"{% endif %}>{{ row[column] }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="menu-table-empty">Keine Einträge mit WELDED-Datum gefunden.</p>
+      {% endif %}
+    </div>
+
+    <aside class="menu-steckbrief" id="menu-steckbrief" aria-label="Proben-Steckbrief">
+      <p class="menu-steckbrief-empty" id="steckbrief-empty">Probe in der Tabelle oder per ID auswählen.</p>
+
+      <div class="menu-steckbrief-body" id="steckbrief-body" hidden>
+        <p class="menu-steckbrief-id" id="steckbrief-id">—</p>
+        <div class="menu-steckbrief-media">
+          <div class="menu-steckbrief-media-item">
+            <figure class="menu-steckbrief-figure">
+              <div class="menu-steckbrief-placeholder" id="steckbrief-probe-placeholder">
+                <span>Probenbild folgt</span>
+              </div>
+              <img
+                id="steckbrief-probe-image"
+                class="menu-steckbrief-image"
+                alt=""
+                hidden
+              />
+            </figure>
+            <p class="menu-steckbrief-caption" id="steckbrief-count">—</p>
+          </div>
+          <div class="menu-steckbrief-media-item">
+            <figure class="menu-steckbrief-figure">
+              <div class="menu-steckbrief-placeholder" id="steckbrief-path-placeholder">
+                <span>Pfad-Vorschau</span>
+              </div>
+              <img
+                id="steckbrief-path-image"
+                class="menu-steckbrief-image"
+                alt=""
+                hidden
+              />
+            </figure>
+            <p class="menu-steckbrief-caption" id="steckbrief-path-id">—</p>
+          </div>
+        </div>
+
+        <div class="menu-steckbrief-comment">
+          <label class="field-label" for="steckbrief-comment">COMMENT</label>
+          <input
+            type="text"
+            id="steckbrief-comment"
+            class="field-input menu-steckbrief-comment-input"
+            spellcheck="false"
+            disabled
+          />
+          <p id="steckbrief-status" class="menu-steckbrief-status" aria-live="polite"></p>
+        </div>
+
+        <div class="menu-steckbrief-tables">
+          <div class="welding-params-table-wrap menu-steckbrief-table-wrap">
+            <table class="welding-params-table">
+              <tbody>
+                {% for field in steckbrief_weld_columns %}
+                <tr>
+                  <th scope="row">{{ field }}</th>
+                  <td>
+                    <input
+                      type="text"
+                      class="field-input field-input-readonly welding-field-input-compact steckbrief-field"
+                      data-field="{{ field }}"
+                      readonly
+                      tabindex="-1"
+                      spellcheck="false"
+                    />
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="welding-params-table-wrap menu-steckbrief-table-wrap">
+            <table class="welding-params-table">
+              <tbody>
+                {% for field in steckbrief_scan_columns %}
+                <tr>
+                  <th scope="row">{{ field }}</th>
+                  <td>
+                    <input
+                      type="text"
+                      class="field-input field-input-readonly welding-field-input-compact steckbrief-field"
+                      data-field="{{ field }}"
+                      readonly
+                      tabindex="-1"
+                      spellcheck="false"
+                    />
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
 </div>
 <script>
   if (sessionStorage.getItem("versuchs-data-changed")) {
@@ -63,7 +178,95 @@
   }
 
   const FILTER_STORAGE_KEY = "menu-filter";
+  const PATH_ID_OPTIONS = new Set({{ path_id_options | tojson }});
+  const EXISTING_IDS = new Set({{ existing_ids | tojson }});
   const rowFilterColumn = document.getElementById("row-filter-column");
+  const addIdButton = document.getElementById("add-id-button");
+  const addIdStatus = document.getElementById("add-id-status");
+  let addIdInProgress = false;
+
+  function setAddIdStatus(message, type = "") {
+    if (!addIdStatus) {
+      return;
+    }
+    addIdStatus.textContent = message;
+    addIdStatus.className = type
+      ? `menu-add-id-status ${type}`
+      : "menu-add-id-status";
+  }
+
+  function syncAddIdButton() {
+    if (!addIdButton) {
+      return;
+    }
+
+    const id = document.getElementById("welding-id")?.value || "";
+    const canAdd = id.length === 3 && !EXISTING_IDS.has(id) && !addIdInProgress;
+    addIdButton.disabled = !canAdd;
+
+    if (addIdInProgress) {
+      return;
+    }
+
+    if (id.length === 3 && EXISTING_IDS.has(id)) {
+      setAddIdStatus("ID existiert bereits.", "");
+    } else if (id.length === 3) {
+      setAddIdStatus("Neue ID — kann hinzugefügt werden.", "ready");
+    } else {
+      setAddIdStatus("");
+    }
+  }
+
+  async function addExperimentId() {
+    const id = document.getElementById("welding-id")?.value || "";
+    if (!id || id.length !== 3 || EXISTING_IDS.has(id) || addIdInProgress) {
+      syncAddIdButton();
+      return;
+    }
+
+    addIdInProgress = true;
+    syncAddIdButton();
+    addIdButton.textContent = "Fügt hinzu…";
+    setAddIdStatus("Speichert in Excel…", "loading");
+
+    try {
+      const response = await fetch("/api/versuchsuebersicht/add-id", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setAddIdStatus(data.error || "Fehler beim Hinzufügen.", "error");
+        return;
+      }
+
+      EXISTING_IDS.add(id);
+      setAddIdStatus(`ID ${id} hinzugefügt.`, "success");
+      localStorage.setItem(FILTER_STORAGE_KEY, "ID");
+      const params = new URLSearchParams(window.location.search);
+      params.set("filter", "ID");
+      window.location.href = `/menu?${params.toString()}`;
+      return;
+    } catch {
+      setAddIdStatus("Verbindungsfehler.", "error");
+    } finally {
+      addIdInProgress = false;
+      addIdButton.textContent = "ID hinzufügen";
+      syncAddIdButton();
+    }
+  }
+
+  if (addIdButton) {
+    addIdButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      addExperimentId();
+    });
+  }
+
+  document.getElementById("welding-id")?.addEventListener("id-change", syncAddIdButton);
+  syncAddIdButton();
 
   (function restoreMenuFilter() {
     const params = new URLSearchParams(window.location.search);
@@ -90,6 +293,238 @@
   }
 
   const menuTable = document.getElementById("menu-table");
+  const steckbriefEmpty = document.getElementById("steckbrief-empty");
+  const steckbriefBody = document.getElementById("steckbrief-body");
+  const steckbriefId = document.getElementById("steckbrief-id");
+  const steckbriefCount = document.getElementById("steckbrief-count");
+  const steckbriefPathId = document.getElementById("steckbrief-path-id");
+  const steckbriefComment = document.getElementById("steckbrief-comment");
+  const steckbriefStatus = document.getElementById("steckbrief-status");
+  const steckbriefPathImage = document.getElementById("steckbrief-path-image");
+  const steckbriefPathPlaceholder = document.getElementById("steckbrief-path-placeholder");
+  const steckbriefFields = document.querySelectorAll(".steckbrief-field");
+  let steckbriefLoadToken = 0;
+  let steckbriefSaveTimer = null;
+  let steckbriefLoadedComment = "";
+
+  function setSteckbriefStatus(message, type = "") {
+    if (!steckbriefStatus) {
+      return;
+    }
+    steckbriefStatus.textContent = message;
+    steckbriefStatus.className = type
+      ? `menu-steckbrief-status ${type}`
+      : "menu-steckbrief-status";
+  }
+
+  function clearSteckbriefFields() {
+    steckbriefFields.forEach((field) => {
+      field.value = "";
+    });
+    if (steckbriefComment) {
+      steckbriefComment.value = "";
+      steckbriefComment.disabled = true;
+    }
+    if (steckbriefId) {
+      steckbriefId.textContent = "—";
+    }
+    if (steckbriefCount) {
+      steckbriefCount.textContent = "—";
+    }
+    if (steckbriefPathId) {
+      steckbriefPathId.textContent = "—";
+    }
+    if (steckbriefPathImage) {
+      steckbriefPathImage.hidden = true;
+      steckbriefPathImage.removeAttribute("src");
+      steckbriefPathImage.alt = "";
+    }
+    if (steckbriefPathPlaceholder) {
+      steckbriefPathPlaceholder.hidden = false;
+    }
+    steckbriefLoadedComment = "";
+  }
+
+  function showSteckbriefEmpty() {
+    clearSteckbriefFields();
+    setSteckbriefStatus("");
+    if (steckbriefEmpty) {
+      steckbriefEmpty.hidden = false;
+    }
+    if (steckbriefBody) {
+      steckbriefBody.hidden = true;
+    }
+  }
+
+  function showSteckbriefBody() {
+    if (steckbriefEmpty) {
+      steckbriefEmpty.hidden = true;
+    }
+    if (steckbriefBody) {
+      steckbriefBody.hidden = false;
+    }
+  }
+
+  function updateSteckbriefPathImage(pathId) {
+    const normalized = String(pathId || "").trim().toUpperCase();
+    if (steckbriefPathId) {
+      steckbriefPathId.textContent = normalized || "—";
+    }
+
+    if (!steckbriefPathImage) {
+      return;
+    }
+
+    if (PATH_ID_OPTIONS.has(normalized)) {
+      steckbriefPathImage.src = `/path-images/${normalized}`;
+      steckbriefPathImage.alt = `Pfad ${normalized}`;
+      steckbriefPathImage.hidden = false;
+      if (steckbriefPathPlaceholder) {
+        steckbriefPathPlaceholder.hidden = true;
+      }
+      return;
+    }
+
+    steckbriefPathImage.hidden = true;
+    steckbriefPathImage.removeAttribute("src");
+    steckbriefPathImage.alt = "";
+    if (steckbriefPathPlaceholder) {
+      steckbriefPathPlaceholder.hidden = false;
+    }
+  }
+
+  function fillSteckbriefFields(fields) {
+    const values = fields || {};
+    steckbriefFields.forEach((field) => {
+      const name = field.dataset.field;
+      const value = values[name];
+      field.value = value == null ? "" : String(value);
+    });
+
+    const comment = values.COMMENT == null ? "" : String(values.COMMENT);
+    steckbriefLoadedComment = comment;
+    if (steckbriefComment) {
+      steckbriefComment.value = comment;
+      steckbriefComment.disabled = false;
+    }
+
+    if (steckbriefCount) {
+      const count = values.COUNT;
+      steckbriefCount.textContent = count == null || count === "" ? "—" : String(count);
+    }
+
+    updateSteckbriefPathImage(values["PATH ID"]);
+  }
+
+  function updateMenuTableComment(id, comment) {
+    if (!menuTable) {
+      return;
+    }
+
+    const row = menuTable.querySelector(`.menu-table-row[data-id="${id}"]`);
+    const cell = row?.querySelector('[data-column="COMMENT"]');
+    if (cell) {
+      cell.textContent = comment;
+    }
+  }
+
+  async function loadSteckbrief(id) {
+    const token = ++steckbriefLoadToken;
+
+    if (!id || id.length !== 3) {
+      showSteckbriefEmpty();
+      return;
+    }
+
+    showSteckbriefBody();
+    if (steckbriefId) {
+      steckbriefId.textContent = id;
+    }
+    if (steckbriefComment) {
+      steckbriefComment.disabled = true;
+    }
+    setSteckbriefStatus("Lädt…", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/${encodeURIComponent(id)}`);
+      const data = await response.json();
+      if (token !== steckbriefLoadToken) {
+        return;
+      }
+
+      if (!response.ok) {
+        clearSteckbriefFields();
+        if (steckbriefId) {
+          steckbriefId.textContent = id;
+        }
+        setSteckbriefStatus(data.error || "Fehler beim Laden.", "error");
+        return;
+      }
+
+      fillSteckbriefFields(data.fields || {});
+      setSteckbriefStatus("");
+    } catch {
+      if (token !== steckbriefLoadToken) {
+        return;
+      }
+      clearSteckbriefFields();
+      if (steckbriefId) {
+        steckbriefId.textContent = id;
+      }
+      setSteckbriefStatus("Verbindungsfehler.", "error");
+    }
+  }
+
+  async function saveSteckbriefComment() {
+    const id = document.getElementById("welding-id")?.value;
+    if (!id || id.length !== 3 || !steckbriefComment || steckbriefComment.disabled) {
+      return;
+    }
+
+    const comment = steckbriefComment.value;
+    if (comment === steckbriefLoadedComment) {
+      return;
+    }
+
+    setSteckbriefStatus("Speichert…", "loading");
+
+    try {
+      const response = await fetch(`/api/welding/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: { COMMENT: comment } }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setSteckbriefStatus(data.error || "Fehler beim Speichern.", "error");
+        return;
+      }
+
+      steckbriefLoadedComment = comment;
+      updateMenuTableComment(id, comment);
+      setSteckbriefStatus("COMMENT gespeichert.", "success");
+    } catch {
+      setSteckbriefStatus("Verbindungsfehler.", "error");
+    }
+  }
+
+  function scheduleSteckbriefCommentSave() {
+    clearTimeout(steckbriefSaveTimer);
+    steckbriefSaveTimer = setTimeout(saveSteckbriefComment, 400);
+  }
+
+  if (steckbriefComment) {
+    steckbriefComment.addEventListener("input", scheduleSteckbriefCommentSave);
+    steckbriefComment.addEventListener("blur", () => {
+      clearTimeout(steckbriefSaveTimer);
+      saveSteckbriefComment();
+    });
+  }
+
+  document.getElementById("welding-id")?.addEventListener("id-change", (event) => {
+    loadSteckbrief(event.detail?.id || "");
+  });
 
   if (menuTable) {
     const tbody = menuTable.querySelector("tbody");
@@ -198,6 +633,13 @@
 
     document.getElementById("welding-id")?.addEventListener("id-change", highlightSelectedRow);
     highlightSelectedRow();
+  }
+
+  const initialId = document.getElementById("welding-id")?.value || "";
+  if (initialId.length === 3) {
+    loadSteckbrief(initialId);
+  } else {
+    showSteckbriefEmpty();
   }
 </script>
 {% endblock %}

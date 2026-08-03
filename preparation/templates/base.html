@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{% block title %}bachelorarbeit{% endblock %}</title>
+    <title>{% block title %}preparation{% endblock %}</title>
     <link rel="stylesheet" href="/styles.css" />
-    {% if active_page == "menu" %}
+    {% if active_page == "generate" %}
     <script>
       if ("scrollRestoration" in history) {
         history.scrollRestoration = "manual";
@@ -18,22 +18,22 @@
       <nav class="nav-bar" aria-label="Main navigation">
         <div class="nav-links">
           <a
-            href="/menu"
-            class="nav-link{% if active_page == 'menu' %} active{% endif %}"
-            {% if active_page == 'menu' %}aria-current="page"{% endif %}
-            >Proben</a
+            href="/generate"
+            class="nav-link{% if active_page == 'generate' %} active{% endif %}"
+            {% if active_page == 'generate' %}aria-current="page"{% endif %}
+            >Generate</a
           >
           <a
-            href="/welding"
-            class="nav-link{% if active_page == 'welding' %} active{% endif %}"
-            {% if active_page == 'welding' %}aria-current="page"{% endif %}
-            >Schweißen</a
+            href="/select"
+            class="nav-link{% if active_page == 'select' %} active{% endif %}"
+            {% if active_page == 'select' %}aria-current="page"{% endif %}
+            >Select</a
           >
           <a
-            href="/scanning"
-            class="nav-link{% if active_page == 'scanning' %} active{% endif %}"
-            {% if active_page == 'scanning' %}aria-current="page"{% endif %}
-            >Scannen</a
+            href="/view"
+            class="nav-link{% if active_page == 'view' %} active{% endif %}"
+            {% if active_page == 'view' %}aria-current="page"{% endif %}
+            >View</a
           >
         </div>
         <div class="nav-id">
@@ -102,11 +102,11 @@
     </header>
     <script>
       (function () {
-        const menuLink = document.querySelector('.nav-link[href="/menu"]');
+        const menuLink = document.querySelector('.nav-link[href="/generate"]');
         const savedFilter = localStorage.getItem("menu-filter");
         if (menuLink && savedFilter) {
           const params = new URLSearchParams({ filter: savedFilter });
-          menuLink.href = `/menu?${params.toString()}`;
+          menuLink.href = `/generate?${params.toString()}`;
         }
       })();
     </script>
@@ -384,14 +384,14 @@
         });
       })();
     </script>
-    {% if active_page == "menu" %}
+    {% if active_page == "generate" %}
     <script>
       (function () {
         const MENU_SCROLL_KEY = "menu-scroll-y";
         const FILTER_STORAGE_KEY = "menu-filter";
 
         function isMenuPath() {
-          return window.location.pathname === "/menu";
+          return window.location.pathname === "/generate";
         }
 
         function saveMenuScrollPosition() {
@@ -478,5 +478,202 @@
       })();
     </script>
     {% endif %}
+    <script>
+      (function () {
+        const layout = document.querySelector(".analyzing-layout");
+        const nav = document.querySelector(".nav");
+        if (!layout) {
+          return;
+        }
+
+        const STICKY_SELECTOR =
+          ".analyzing-sidebar, .analyzing-characteristics-sidebar, .analyzing-weld-controls-sidebar, .analyzing-scan-controls-sidebar, .analyzing-correlate-controls-sidebar, .analyzing-graphs-panel";
+        const STICKY_EDGE_GAP = 12;
+        const RESIZE_DEBOUNCE_MS = 120;
+
+        let lastScrollY = window.scrollY;
+        let navOffset = nav ? Math.ceil(nav.getBoundingClientRect().height) : 0;
+        let stickyColumns = [];
+        let scrollTicking = false;
+        let layoutTickTimer = 0;
+        const shiftByColumn = new WeakMap();
+
+        function isStickyColumn(column) {
+          if (
+            column.matches(".analyzing-view-controls-stack > aside[data-view-panel]") &&
+            !column.classList.contains("is-active")
+          ) {
+            return false;
+          }
+          return true;
+        }
+
+        function refreshStickyColumns() {
+          stickyColumns = Array.from(layout.querySelectorAll(STICKY_SELECTOR)).filter(isStickyColumn);
+        }
+
+        function refreshNavOffset() {
+          navOffset = nav ? Math.ceil(nav.getBoundingClientRect().height) : 0;
+          document.documentElement.style.setProperty(
+            "--analyzing-nav-stick-top",
+            `${navOffset + STICKY_EDGE_GAP}px`,
+          );
+          document.documentElement.style.setProperty(
+            "--analyzing-nav-stick-bottom",
+            `${STICKY_EDGE_GAP}px`,
+          );
+        }
+
+        function getColumnShift(column) {
+          return shiftByColumn.get(column) ?? 0;
+        }
+
+        function setColumnShift(column, value) {
+          shiftByColumn.set(column, value);
+        }
+
+        function getTopStick() {
+          return navOffset + STICKY_EDGE_GAP;
+        }
+
+        function clampShift(value, topStick, columnHeight, viewportHeight) {
+          const minShift = Math.min(
+            0,
+            viewportHeight - STICKY_EDGE_GAP - columnHeight - topStick,
+          );
+          return Math.max(minShift, Math.min(0, value));
+        }
+
+        function fitsInViewport(columnHeight, viewportHeight) {
+          return columnHeight <= viewportHeight - navOffset - 2 * STICKY_EDGE_GAP;
+        }
+
+        function setColumnTop(column, topStick, shiftY) {
+          column.style.setProperty(
+            "--analyzing-sticky-top",
+            `${Math.round(topStick + shiftY)}px`,
+          );
+        }
+
+        function applyColumnShift(column, viewportHeight, { resyncFromDom = false } = {}) {
+          const columnHeight = column.offsetHeight;
+          const topStick = getTopStick();
+          let shiftY = 0;
+
+          if (!fitsInViewport(columnHeight, viewportHeight)) {
+            if (resyncFromDom) {
+              shiftY = clampShift(
+                column.getBoundingClientRect().top - topStick,
+                topStick,
+                columnHeight,
+                viewportHeight,
+              );
+            } else {
+              shiftY = clampShift(
+                getColumnShift(column),
+                topStick,
+                columnHeight,
+                viewportHeight,
+              );
+            }
+          }
+
+          setColumnShift(column, shiftY);
+          setColumnTop(column, topStick, shiftY);
+        }
+
+        function applyAllColumnShifts(viewportHeight, options) {
+          stickyColumns.forEach((column) => {
+            applyColumnShift(column, viewportHeight, options);
+          });
+        }
+
+        function updateFromScroll() {
+          scrollTicking = false;
+
+          const scrollY = window.scrollY;
+          const delta = scrollY - lastScrollY;
+          lastScrollY = scrollY;
+
+          const viewportHeight = window.innerHeight;
+          const topStick = getTopStick();
+          const layoutTop = layout.getBoundingClientRect().top;
+          const beforeLayout = layoutTop > topStick + 1;
+
+          stickyColumns.forEach((column) => {
+            const columnHeight = column.offsetHeight;
+
+            if (fitsInViewport(columnHeight, viewportHeight) || beforeLayout) {
+              setColumnShift(column, 0);
+              setColumnTop(column, topStick, 0);
+              return;
+            }
+
+            const shiftY = clampShift(
+              getColumnShift(column) - delta,
+              topStick,
+              columnHeight,
+              viewportHeight,
+            );
+            setColumnShift(column, shiftY);
+            setColumnTop(column, topStick, shiftY);
+          });
+        }
+
+        function onScroll() {
+          if (scrollTicking) {
+            return;
+          }
+          scrollTicking = true;
+          window.requestAnimationFrame(updateFromScroll);
+        }
+
+        function scheduleLayoutUpdate({ resyncFromDom = false } = {}) {
+          window.clearTimeout(layoutTickTimer);
+          layoutTickTimer = window.setTimeout(() => {
+            window.requestAnimationFrame(() => {
+              refreshNavOffset();
+              refreshStickyColumns();
+              applyAllColumnShifts(window.innerHeight, { resyncFromDom });
+            });
+          }, RESIZE_DEBOUNCE_MS);
+        }
+
+        window.updateAnalyzingStickyTop = function () {
+          window.requestAnimationFrame(() => {
+            refreshStickyColumns();
+            applyAllColumnShifts(window.innerHeight);
+          });
+        };
+
+        window.resetAnalyzingStickyShift = function () {
+          lastScrollY = window.scrollY;
+          refreshStickyColumns();
+          stickyColumns.forEach((column) => {
+            setColumnShift(column, 0);
+          });
+          window.requestAnimationFrame(() => {
+            applyAllColumnShifts(window.innerHeight);
+          });
+        };
+
+        refreshNavOffset();
+        refreshStickyColumns();
+        applyAllColumnShifts(window.innerHeight, { resyncFromDom: true });
+
+        window.addEventListener("scroll", onScroll, { passive: true });
+        window.addEventListener("resize", () => {
+          lastScrollY = window.scrollY;
+          scheduleLayoutUpdate({ resyncFromDom: true });
+        });
+
+        if (typeof ResizeObserver === "function") {
+          const resizeObserver = new ResizeObserver(() => {
+            scheduleLayoutUpdate();
+          });
+          resizeObserver.observe(layout);
+        }
+      })();
+    </script>
   </body>
 </html>

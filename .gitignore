@@ -1,7 +1,8 @@
 # Local scan and welding data
-data/scanning/
-data/welding/
-data/analyzing/
+data/acquesition/scanning/
+data/acquesition/welding/
+data/preparation/generated/
+backups
 
-# scanCONTROL installers (manually install on each machine)
-scanCONTROL/*.exe
+
+

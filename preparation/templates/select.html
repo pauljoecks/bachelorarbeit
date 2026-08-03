@@ -1,0 +1,570 @@
+{% extends "base.html" %}
+
+{% block title %}select · preparation{% endblock %}
+
+{% block content %}
+<div class="analyzing-layout">
+  <div class="analyzing-sticky-track">
+  <aside class="analyzing-sidebar" aria-label="Probenauswahl">
+    <div class="menu-table-header">
+      <p class="menu-table-count">{{ table_rows|length }} Einträge mit WELDED und SCANNED</p>
+    </div>
+    <div class="menu-table-wrapper analyzing-table-wrapper">
+      {% if table_rows %}
+      <table class="menu-table analyzing-table" id="analyzing-table">
+        <thead>
+          <tr>
+            <th scope="col" class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  id="analyzing-select-all"
+                  class="analyzing-row-select analyzing-select-all"
+                  aria-label="Alle auswählbaren Einträge auswählen"
+                />
+              </div>
+            </th>
+            {% for column in table_columns %}
+            {% set sort_type = "text" %}
+            {% if column in ["SERIES", "NUMBER"] %}
+            {% set sort_type = "number" %}
+            {% endif %}
+            <th scope="col">
+              <button
+                type="button"
+                class="menu-table-sort"
+                data-sort-index="{{ loop.index0 + 1 }}"
+                data-sort-type="{{ sort_type }}"
+              >
+                <span title="{{ column }}">{{ table_column_labels.get(column, column) }}</span>
+                <span class="menu-table-sort-indicator" aria-hidden="true"></span>
+              </button>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in table_rows %}
+          <tr
+            class="menu-table-row"
+            data-id="{{ row.ID }}"
+            data-has-analyze="{{ '1' if row.has_analyze else '0' }}"
+          >
+            <td class="analyzing-table-checkbox-cell">
+              <div class="analyzing-table-checkbox-shell">
+                <input
+                  type="checkbox"
+                  class="analyzing-row-select"
+                  aria-label="ID {{ row.ID }} auswählen"
+                />
+              </div>
+            </td>
+            {% for column in table_columns %}
+            <td>{{ row[column] }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="menu-table-empty">Keine Einträge mit WELDED und SCANNED gefunden.</p>
+      {% endif %}
+    </div>
+  </aside>
+  </div>
+
+  <div class="analyzing-sticky-track" id="analyzing-characteristics-sticky-track">
+  <aside
+    class="analyzing-characteristics-sidebar analyzing-weld-controls-sidebar analyzing-correlate-controls-sidebar"
+    id="analyzing-characteristics-sidebar"
+    aria-label="Merkmalsauswahl"
+  >
+    {% if characteristic_rows %}
+    <div class="analyzing-correlate-controls-content">
+      {% if target_characteristic_keys %}
+      <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
+        <div class="menu-table-header">
+          <p class="menu-table-count">Zeilvariable</p>
+        </div>
+        <div class="analyzing-weld-sidebar-toggles" id="analyzing-characteristics-row-variable-toggles">
+          {% for key in target_characteristic_keys %}
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              class="analyzing-row-variable-select"
+              data-characteristic="{{ key }}"
+              aria-label="{{ key }} als Zeilvariable auswählen"
+            />
+            <span title="{{ key }}">{{ key }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if weld_characteristic_keys %}
+      <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
+        <div class="menu-table-header">
+          <p class="menu-table-count">Kennwerte</p>
+        </div>
+        <div class="analyzing-weld-sidebar-toggles" id="analyzing-characteristics-kennwerte-toggles">
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              id="analyzing-kennwerte-select-all"
+              class="analyzing-kennwerte-select-all"
+              aria-label="Alle Kennwerte auswählen"
+            />
+            <span>Alle auswählen</span>
+          </label>
+          {% for key in weld_characteristic_keys %}
+          <label class="analyzing-weld-sidebar-toggle">
+            <input
+              type="checkbox"
+              class="analyzing-kennwert-select"
+              data-characteristic="{{ key }}"
+              aria-label="{{ key }} auswählen"
+            />
+            <span title="{{ key }}">{{ key }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="menu-table-header">
+      <p class="menu-table-count">0 Merkmale</p>
+    </div>
+    <p class="menu-table-empty">Keine Merkmale definiert.</p>
+    {% endif %}
+  </aside>
+  </div>
+
+  <div class="analyzing-sticky-track analyzing-sticky-track-panel">
+  <section class="analyzing-graphs-panel" aria-label="Feature-Auswahl">
+    <div id="select-panel" class="analyzing-view-panel analyzing-select-panel"></div>
+  </section>
+  </div>
+</div>
+<script>
+  (function () {
+    const root = document.getElementById("analyzing-characteristics-sidebar");
+    if (!root) {
+      return;
+    }
+
+    const ROW_VARIABLE_KEYS = {{ target_characteristic_keys | tojson }};
+    const KENNWERT_KEYS = {{ weld_characteristic_keys | tojson }};
+    const selectAllKennwerte = document.getElementById("analyzing-kennwerte-select-all");
+    const STORAGE_KEY = "analyzing-selected-characteristics";
+
+    function getRowVariableCheckboxes() {
+      return Array.from(root.querySelectorAll("input.analyzing-row-variable-select[data-characteristic]"));
+    }
+
+    function getKennwertCheckboxes() {
+      return Array.from(root.querySelectorAll("input.analyzing-kennwert-select[data-characteristic]"));
+    }
+
+    function loadStoredSelections() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          return new Set();
+        }
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set();
+      } catch {
+        return new Set();
+      }
+    }
+
+    function getSelectedCharacteristics() {
+      const selected = [];
+      getRowVariableCheckboxes().forEach((checkbox) => {
+        if (checkbox.checked && checkbox.dataset.characteristic) {
+          selected.push(checkbox.dataset.characteristic);
+        }
+      });
+      getKennwertCheckboxes().forEach((checkbox) => {
+        if (checkbox.checked && checkbox.dataset.characteristic) {
+          selected.push(checkbox.dataset.characteristic);
+        }
+      });
+      return selected;
+    }
+
+    function persistSelections() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(getSelectedCharacteristics()));
+    }
+
+    function enforceSingleRowVariable(preferredKey = null) {
+      const checkboxes = getRowVariableCheckboxes();
+      const checked = checkboxes.filter((checkbox) => checkbox.checked);
+      if (checked.length <= 1) {
+        return;
+      }
+
+      let keepKey = preferredKey;
+      if (!keepKey || !checked.some((checkbox) => checkbox.dataset.characteristic === keepKey)) {
+        keepKey =
+          ROW_VARIABLE_KEYS.find((key) =>
+            checked.some((checkbox) => checkbox.dataset.characteristic === key),
+          ) ?? checked[0].dataset.characteristic;
+      }
+
+      checkboxes.forEach((checkbox) => {
+        checkbox.checked = checkbox.dataset.characteristic === keepKey;
+      });
+    }
+
+    function syncKennwerteSelectAll() {
+      if (!selectAllKennwerte) {
+        return;
+      }
+
+      const checkboxes = getKennwertCheckboxes();
+      selectAllKennwerte.disabled = checkboxes.length === 0;
+
+      if (checkboxes.length === 0) {
+        selectAllKennwerte.checked = false;
+        selectAllKennwerte.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
+      selectAllKennwerte.checked = checkedCount === checkboxes.length;
+      selectAllKennwerte.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+    }
+
+    function restoreSelections() {
+      const stored = loadStoredSelections();
+
+      getRowVariableCheckboxes().forEach((checkbox) => {
+        checkbox.checked = stored.has(checkbox.dataset.characteristic);
+      });
+      enforceSingleRowVariable();
+
+      getKennwertCheckboxes().forEach((checkbox) => {
+        checkbox.checked = stored.has(checkbox.dataset.characteristic);
+      });
+
+      syncKennwerteSelectAll();
+    }
+
+    getRowVariableCheckboxes().forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          enforceSingleRowVariable(checkbox.dataset.characteristic);
+        }
+        persistSelections();
+      });
+    });
+
+    getKennwertCheckboxes().forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        syncKennwerteSelectAll();
+        persistSelections();
+      });
+    });
+
+    selectAllKennwerte?.addEventListener("change", () => {
+      const checked = selectAllKennwerte.checked;
+      getKennwertCheckboxes().forEach((checkbox) => {
+        checkbox.checked = checked;
+      });
+      selectAllKennwerte.indeterminate = false;
+      persistSelections();
+    });
+
+    restoreSelections();
+  })();
+</script>
+<script>
+  window.getActiveAnalyzingView = function () { return "select"; };
+</script>
+<script>
+  if (sessionStorage.getItem("versuchs-data-changed")) {
+    sessionStorage.removeItem("versuchs-data-changed");
+    window.location.reload();
+  }
+
+  const analyzingTable = document.getElementById("analyzing-table");
+
+  if (analyzingTable) {
+    const tbody = analyzingTable.querySelector("tbody");
+    const sortButtons = analyzingTable.querySelectorAll(".menu-table-sort");
+    let activeIndex = -1;
+    let ascending = true;
+
+    function compareValues(a, b, type) {
+      if (type === "number") {
+        const numA = Number.parseFloat(a);
+        const numB = Number.parseFloat(b);
+
+        if (Number.isNaN(numA) && Number.isNaN(numB)) {
+          return 0;
+        }
+        if (Number.isNaN(numA)) {
+          return 1;
+        }
+        if (Number.isNaN(numB)) {
+          return -1;
+        }
+
+        return numA - numB;
+      }
+
+      if (type === "date") {
+        const timeA = Date.parse(a);
+        const timeB = Date.parse(b);
+
+        if (Number.isNaN(timeA) && Number.isNaN(timeB)) {
+          return 0;
+        }
+        if (Number.isNaN(timeA)) {
+          return 1;
+        }
+        if (Number.isNaN(timeB)) {
+          return -1;
+        }
+
+        return timeA - timeB;
+      }
+
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    }
+
+    function updateIndicators() {
+      sortButtons.forEach((button) => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const indicator = button.querySelector(".menu-table-sort-indicator");
+        const isActive = index === activeIndex;
+
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-sort", isActive ? (ascending ? "ascending" : "descending") : "none");
+        indicator.textContent = isActive ? (ascending ? "▲" : "▼") : "";
+      });
+    }
+
+    function sortByColumn(index, type) {
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+
+      rows.sort((rowA, rowB) => {
+        const valueA = rowA.children[index]?.textContent.trim() ?? "";
+        const valueB = rowB.children[index]?.textContent.trim() ?? "";
+        const result = compareValues(valueA, valueB, type);
+        return ascending ? result : -result;
+      });
+
+      rows.forEach((row) => tbody.appendChild(row));
+    }
+
+    sortButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number.parseInt(button.dataset.sortIndex, 10);
+        const type = button.dataset.sortType;
+
+        if (activeIndex === index) {
+          ascending = !ascending;
+        } else {
+          activeIndex = index;
+          ascending = true;
+        }
+
+        sortByColumn(index, type);
+        updateIndicators();
+      });
+    });
+
+    const ANALYZING_SELECTION_STORAGE_KEY = "analyzing-selected-ids";
+
+    function loadStoredSelections() {
+      try {
+        const raw = localStorage.getItem(ANALYZING_SELECTION_STORAGE_KEY);
+        if (!raw) {
+          return new Set();
+        }
+
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+          return new Set();
+        }
+
+        return new Set(
+          parsed
+            .map((id) => String(id).trim().toUpperCase())
+            .filter((id) => id.length === 3),
+        );
+      } catch {
+        return new Set();
+      }
+    }
+
+    function getSelectedAnalyzingIds() {
+      return getSelectableCheckboxes()
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.closest(".menu-table-row")?.dataset.id)
+        .filter(Boolean)
+        .map((id) => id.trim().toUpperCase())
+        .filter((id) => id.length === 3);
+    }
+
+    function persistCheckboxSelections() {
+      localStorage.setItem(
+        ANALYZING_SELECTION_STORAGE_KEY,
+        JSON.stringify(getSelectedAnalyzingIds()),
+      );
+    }
+
+    function restoreCheckboxSelections() {
+      const stored = loadStoredSelections();
+
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        const checkbox = row.querySelector(".analyzing-row-select");
+        if (!checkbox || checkbox.disabled) {
+          return;
+        }
+
+        checkbox.checked = stored.has(row.dataset.id);
+      });
+
+      syncSelectAllCheckbox();
+    }
+
+    function getSelectableCheckboxes() {
+      return Array.from(tbody.querySelectorAll(".analyzing-row-select:not(:disabled)"));
+    }
+
+    function rowHasAnalyze(row) {
+      return row?.dataset.hasAnalyze === "1";
+    }
+
+    function syncCheckboxAvailabilityForView() {
+      const analyzeOnly = true;
+      let changed = false;
+
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        const checkbox = row.querySelector(".analyzing-row-select");
+        if (!checkbox) {
+          return;
+        }
+
+        const allow = !analyzeOnly || rowHasAnalyze(row);
+        const nextDisabled = !allow;
+        if (checkbox.disabled !== nextDisabled) {
+          changed = true;
+        }
+        checkbox.disabled = nextDisabled;
+        if (nextDisabled && checkbox.checked) {
+          checkbox.checked = false;
+          changed = true;
+        }
+      });
+
+      syncSelectAllCheckbox();
+      if (changed) {
+        persistCheckboxSelections();
+      }
+      notifySelectionChange();
+    }
+
+    function syncSelectAllCheckbox() {
+      const selectAll = document.getElementById("analyzing-select-all");
+      if (!selectAll) {
+        return;
+      }
+
+      const selectable = getSelectableCheckboxes();
+      selectAll.disabled = selectable.length === 0;
+
+      if (selectable.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = selectable.filter((checkbox) => checkbox.checked).length;
+      selectAll.checked = checkedCount === selectable.length;
+      selectAll.indeterminate = checkedCount > 0 && checkedCount < selectable.length;
+    }
+
+    function notifySelectionChange() {
+      if (typeof window.syncAnalyzingGenerateButton === "function") {
+        window.syncAnalyzingGenerateButton();
+      }
+    }
+
+    function highlightSelectedRow() {
+      const currentId = document.getElementById("welding-id")?.value;
+      tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+        row.classList.toggle("selected", row.dataset.id === currentId);
+      });
+    }
+
+    function updateRowAnalyzeState(id, hasAnalyze) {
+      const row = tbody?.querySelector(`.menu-table-row[data-id="${id}"]`);
+      if (!row) {
+        return;
+      }
+
+      row.dataset.hasAnalyze = hasAnalyze ? "1" : "0";
+      syncCheckboxAvailabilityForView();
+    }
+
+    window.getSelectedAnalyzingIds = getSelectedAnalyzingIds;
+    window.updateAnalyzingRowState = updateRowAnalyzeState;
+    window.syncAnalyzingCheckboxAvailability = syncCheckboxAvailabilityForView;
+
+    const selectAllCheckbox = document.getElementById("analyzing-select-all");
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+
+      selectAllCheckbox.addEventListener("change", () => {
+        const checked = selectAllCheckbox.checked;
+        getSelectableCheckboxes().forEach((checkbox) => {
+          checkbox.checked = checked;
+        });
+        selectAllCheckbox.indeterminate = false;
+        persistCheckboxSelections();
+        notifySelectionChange();
+      });
+    }
+
+    tbody.querySelectorAll(".menu-table-row").forEach((row) => {
+      const checkbox = row.querySelector(".analyzing-row-select");
+      if (checkbox) {
+        checkbox.addEventListener("click", (event) => {
+          event.stopPropagation();
+        });
+
+        checkbox.addEventListener("change", () => {
+          syncSelectAllCheckbox();
+          persistCheckboxSelections();
+          notifySelectionChange();
+        });
+      }
+
+      row.addEventListener("click", () => {
+        const id = row.dataset.id;
+        if (!id || !window.setExperimentId) {
+          return;
+        }
+
+        window.setExperimentId(id);
+        highlightSelectedRow();
+      });
+    });
+
+    document.getElementById("welding-id")?.addEventListener("id-change", highlightSelectedRow);
+    highlightSelectedRow();
+    restoreCheckboxSelections();
+    syncCheckboxAvailabilityForView();
+    notifySelectionChange();
+  }
+
+</script>
+{% endblock %}
