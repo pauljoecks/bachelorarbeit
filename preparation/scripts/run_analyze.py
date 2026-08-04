@@ -39,6 +39,8 @@ WELD_START_DELAY_S = 0.020
 # Keep only this many seconds from the center of the detected weld phase.
 WELD_CROPPED_CENTER_DURATION_S = 10.0
 CROPPED_SCAN_FILENAME = "cropped_scan.json"
+SCAN_64_64_FILENAME = "64_64_scan.json"
+SCAN_64_64_GRID_SIZE = 64
 CROPPED_WELD_FILENAME = "cropped_weld.h5"
 POWER_H5_FILENAME = "power.h5"
 CHARACTERISTICS_FILENAME = "characteristics.json"
@@ -266,6 +268,7 @@ SCAN_GENERATE_KEYS = (
     "x_profile",
     "y_profile",
     "characteristics",
+    "64_64_scan",
 )
 WELD_GENERATE_KEYS = (
     "cropped",
@@ -293,6 +296,8 @@ def normalize_generate_options(raw, valid_keys: tuple[str, ...]) -> dict[str, bo
 
 def resolve_scan_generate_options(options: dict[str, bool]) -> dict[str, bool]:
     resolved = dict(options)
+    if resolved.get("64_64_scan"):
+        resolved["cropped_scan"] = True
     if resolved.get("filtered") or resolved.get("x_profile") or resolved.get("y_profile"):
         resolved["cropped_scan"] = True
     if resolved.get("x_profile") or resolved.get("y_profile"):
@@ -326,12 +331,21 @@ def collect_regenerate_deletion_keys(
     for index, key in enumerate(keys):
         if options.get(key):
             deletion_keys.update(keys[index:])
+    # 64×64 depends only on cropped_scan — later scan steps do not invalidate it.
+    if (
+        "64_64_scan" in deletion_keys
+        and not options.get("cropped_scan")
+        and not options.get("64_64_scan")
+    ):
+        deletion_keys.discard("64_64_scan")
     return frozenset(deletion_keys)
 
 
 def _artifact_relative_paths_for_generate_key(key: str) -> tuple[str, ...]:
     if key == "cropped_scan":
         return (f"{SCAN_SUBDIR}/{CROPPED_SCAN_FILENAME}",)
+    if key == "64_64_scan":
+        return (f"{SCAN_SUBDIR}/{SCAN_64_64_FILENAME}",)
     if key == "filtered":
         return (f"{SCAN_SUBDIR}/{FILTERED_SCAN_FILENAME}",)
     if key == "x_profile":
@@ -876,6 +890,127 @@ def generate_filtered_scan_document(
         },
         "profile_count": len(filtered_profiles),
         "profiles": filtered_profiles,
+    }
+
+
+def _tight_valid_bbox(valid_mask: np.ndarray) -> tuple[int, int, int, int]:
+    rows = np.any(valid_mask, axis=1)
+    cols = np.any(valid_mask, axis=0)
+    if not rows.any() or not cols.any():
+        raise ValueError("Keine gültigen Messpunkte für 64×64-Scan gefunden.")
+    row_indices = np.flatnonzero(rows)
+    col_indices = np.flatnonzero(cols)
+    return (
+        int(row_indices[0]),
+        int(row_indices[-1]),
+        int(col_indices[0]),
+        int(col_indices[-1]),
+    )
+
+
+def _profile_y_mm_values(profiles: list[dict]) -> np.ndarray:
+    y_values = []
+    for profile in profiles:
+        y_mm = profile.get("y_mm")
+        if y_mm is None:
+            raise ValueError("y_mm fehlt in cropped_scan-Profil.")
+        y_values.append(float(y_mm))
+    return np.asarray(y_values, dtype=float)
+
+
+def _mean_pool_valid_2d(
+    values: np.ndarray,
+    valid_mask: np.ndarray,
+    out_rows: int,
+    out_cols: int,
+) -> np.ndarray:
+    """Downsample by mean of all valid source pixels in each output cell."""
+    in_rows, in_cols = values.shape
+    if in_rows < 1 or in_cols < 1:
+        raise ValueError("Leeres Eingaberaster für 64×64-Resampling.")
+
+    out = np.zeros((out_rows, out_cols), dtype=float)
+    for oi in range(out_rows):
+        r0 = (oi * in_rows) // out_rows
+        r1 = ((oi + 1) * in_rows) // out_rows
+        if r1 <= r0:
+            r1 = min(r0 + 1, in_rows)
+
+        for oj in range(out_cols):
+            c0 = (oj * in_cols) // out_cols
+            c1 = ((oj + 1) * in_cols) // out_cols
+            if c1 <= c0:
+                c1 = min(c0 + 1, in_cols)
+
+            block_values = values[r0:r1, c0:c1]
+            block_mask = valid_mask[r0:r1, c0:c1]
+            keep = block_mask & np.isfinite(block_values) & (block_values > 0)
+            if np.any(keep):
+                out[oi, oj] = float(np.mean(block_values[keep]))
+
+    return out
+
+
+def generate_64_64_scan_document(
+    cropped_scan_document: dict,
+    *,
+    grid_size: int = SCAN_64_64_GRID_SIZE,
+) -> dict:
+    profiles = cropped_scan_document.get("profiles") or []
+    if not profiles:
+        raise ValueError("Keine Profile in cropped_scan für 64×64-Scan gefunden.")
+
+    z_stack, valid_mask = _stack_profile_z_and_valid_mask(profiles)
+    row_start, row_end, col_start, col_end = _tight_valid_bbox(valid_mask)
+
+    z_crop = z_stack[row_start : row_end + 1, col_start : col_end + 1]
+    valid_crop = valid_mask[row_start : row_end + 1, col_start : col_end + 1]
+    z_grid = _mean_pool_valid_2d(z_crop, valid_crop, grid_size, grid_size)
+
+    y_mm_src = _profile_y_mm_values(profiles)
+    x_mm_src = np.asarray(profiles[0]["x_mm"], dtype=float)
+    if x_mm_src.size <= col_end:
+        raise ValueError("x_mm-Auflösung passt nicht zum gültigen Probenbereich.")
+
+    y_low = float(y_mm_src[row_start])
+    y_high = float(y_mm_src[row_end])
+    y_min = min(y_low, y_high)
+    y_max = max(y_low, y_high)
+    y_mm = np.linspace(y_min, y_max, grid_size)
+
+    x_at_start = float(x_mm_src[col_start])
+    x_at_end = float(x_mm_src[col_end])
+    x_min = min(x_at_start, x_at_end)
+    x_max = max(x_at_start, x_at_end)
+    x_reversed = x_at_start > x_at_end
+    if x_reversed:
+        x_mm = np.linspace(x_max, x_min, grid_size)
+    else:
+        x_mm = np.linspace(x_min, x_max, grid_size)
+
+    values = np.round(z_grid, 6).reshape(-1).astype(float).tolist()
+
+    return {
+        "experiment_id": cropped_scan_document.get("experiment_id"),
+        "source_json_file": CROPPED_SCAN_FILENAME,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "grid_size": int(grid_size),
+        "profile_count": int(grid_size),
+        "resolution": int(grid_size),
+        "x_min": round(x_min, 6),
+        "x_max": round(x_max, 6),
+        "x_reversed": bool(x_reversed),
+        "y_min": round(y_min, 6),
+        "y_max": round(y_max, 6),
+        "y_mm": np.round(y_mm, 6).astype(float).tolist(),
+        "x_mm": np.round(x_mm, 6).astype(float).tolist(),
+        "values": values,
+        "crop": {
+            "profile_start": row_start,
+            "profile_end": row_end,
+            "column_start": col_start,
+            "column_end": col_end,
+        },
     }
 
 
@@ -3734,6 +3869,11 @@ def run_analyze_scan(
     if options["cropped_scan"]:
         _dump_json(scan_dir / CROPPED_SCAN_FILENAME, document, compact=True)
         result["scan_file"] = CROPPED_SCAN_FILENAME
+
+    if options["64_64_scan"]:
+        grid_document = generate_64_64_scan_document(document)
+        _dump_json(scan_dir / SCAN_64_64_FILENAME, grid_document, compact=True)
+        result["64_64_scan_file"] = SCAN_64_64_FILENAME
 
     filtered_document = None
     if options["filtered"] or options["x_profile"] or options["y_profile"]:

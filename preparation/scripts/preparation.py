@@ -22,6 +22,8 @@ ACQUESITION_DIR = BASE_DIR / "acquesition"
 SCRIPTS_DIR = PREPARATION_DIR / "scripts"
 ACQUESITION_SCRIPTS_DIR = ACQUESITION_DIR / "scripts"
 TEMPLATES_DIR = PREPARATION_DIR / "templates"
+PATTERNS_DIR = TEMPLATES_DIR / "patterns"
+VALID_PATH_IDS = frozenset({"SO", "LI", "SI", "ME", "PO"})
 DEFAULT_DATA_DIR_PATH = "data"
 DEFAULT_DATA_DIR = BASE_DIR / DEFAULT_DATA_DIR_PATH
 VERSUCHSUEBERSICHT_FILENAME = "Versuchsübersicht.xlsx"
@@ -60,6 +62,7 @@ VIEW_EXCEL_VALUE_FIELDS = (
     ("SERIES", "series"),
     ("NUMBER", "number"),
 )
+VIEW_VECTOR_EXPORT_KEYS = frozenset({"path_id_vector", "64_64_scan"})
 VIEW_META_KEYS = frozenset(key for _column, key in VIEW_EXCEL_VALUE_FIELDS)
 MENU_FILTER_OPTIONS = ["WELDED", "SCANNED", "ID"]
 SCANSPEED_COLUMN = "SCANSPEED [mm/s]"
@@ -72,6 +75,7 @@ ANALYZE_CHAR_GRAPHEN_FILENAME = "char_graphen.json"
 ANALYZE_FILTERED_FILENAME = "filtered.json"
 ANALYZE_X_PROFILE_FILENAME = "X_profile.json"
 ANALYZE_Y_PROFILE_FILENAME = "Y_profile.json"
+ANALYZE_64_64_SCAN_FILENAME = "64_64_scan.json"
 GENERATE_SCAN_SUBDIR = "scan"
 GENERATE_WELD_SUBDIR = "weld"
 _GENERATE_SCAN_FILES = frozenset(
@@ -80,6 +84,7 @@ _GENERATE_SCAN_FILES = frozenset(
         ANALYZE_FILTERED_FILENAME,
         ANALYZE_X_PROFILE_FILENAME,
         ANALYZE_Y_PROFILE_FILENAME,
+        ANALYZE_64_64_SCAN_FILENAME,
     }
 )
 _GENERATE_WELD_FILES = frozenset(
@@ -596,6 +601,8 @@ def _get_view_excel_values_for_row(row):
 
 def _get_view_value_column_labels() -> dict[str, str]:
     labels = {key: column_name for column_name, key in VIEW_EXCEL_VALUE_FIELDS}
+    labels["path_id_vector"] = "PATH ID Vektor"
+    labels["64_64_scan"] = "64_64_scan"
     for key in _get_target_characteristic_keys():
         labels[key] = key
     for key in _get_weld_characteristic_keys():
@@ -604,10 +611,44 @@ def _get_view_value_column_labels() -> dict[str, str]:
 
 
 def _get_view_value_column_order() -> tuple[str, ...]:
-    return tuple(
-        key
-        for _column_name, key in VIEW_EXCEL_VALUE_FIELDS
-    ) + _get_target_characteristic_keys() + _get_weld_characteristic_keys()
+    meta_keys = tuple(key for _column_name, key in VIEW_EXCEL_VALUE_FIELDS)
+    return (
+        meta_keys
+        + ("path_id_vector",)
+        + _get_target_characteristic_keys()
+        + ("64_64_scan",)
+        + _get_weld_characteristic_keys()
+    )
+
+
+def _serialize_path_id_vector(path_id: str | None) -> str | None:
+    normalized = str(path_id or "").strip().upper()
+    if normalized not in VALID_PATH_IDS:
+        return None
+
+    pattern_path = PATTERNS_DIR / f"{normalized}.json"
+    if not pattern_path.is_file():
+        return None
+
+    with pattern_path.open("r", encoding="utf-8") as handle:
+        paths = json.load(handle)
+    if not isinstance(paths, list):
+        return None
+    return json.dumps(paths, ensure_ascii=False, separators=(",", ":"))
+
+
+def _serialize_64_64_scan_values(experiment_id: str) -> str | None:
+    grid_path, error = _resolve_64_64_scan_path_for_experiment(experiment_id)
+    if error or grid_path is None:
+        return None
+
+    with grid_path.open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+
+    values = document.get("values")
+    if not isinstance(values, list):
+        return None
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
 
 
 def _characteristics_document_to_value_map(document) -> dict[str, float]:
@@ -640,9 +681,14 @@ def _characteristics_document_to_value_map(document) -> dict[str, float]:
 
 def _resolve_view_export_cell(
     column_key: str,
+    experiment_id: str,
     excel_values: dict[str, str],
     characteristics_map: dict[str, float],
 ):
+    if column_key == "path_id_vector":
+        return _serialize_path_id_vector(excel_values.get("path_id"))
+    if column_key == "64_64_scan":
+        return _serialize_64_64_scan_values(experiment_id)
     if column_key in VIEW_META_KEYS:
         value = excel_values.get(column_key, "")
         return value if value not in (None, "") else None
@@ -1006,6 +1052,65 @@ def _load_generate_scan_heatmap(analyze_path):
     }
 
 
+def _load_grid_scan_heatmap(grid_path):
+    with grid_path.open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+
+    profile_count = int(document.get("profile_count") or document.get("grid_size") or 0)
+    resolution = int(document.get("resolution") or document.get("grid_size") or 0)
+    values = [float(value) for value in document.get("values") or []]
+    if profile_count <= 0 or resolution <= 0 or len(values) != profile_count * resolution:
+        raise ValueError("Ungültiges 64×64-Scan-Raster.")
+
+    positive_values = [value for value in values if value > 0]
+    z_scale_min = 0.0
+    z_scale_max = 0.0
+    if positive_values:
+        sorted_values = sorted(positive_values)
+        lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
+        upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
+        z_scale_min = float(sorted_values[lower_index])
+        z_scale_max = float(sorted_values[upper_index])
+        if z_scale_max <= z_scale_min:
+            z_scale_min = float(sorted_values[0])
+            z_scale_max = float(sorted_values[-1])
+
+    y_mm = [float(value) for value in document.get("y_mm") or []]
+    if len(y_mm) != profile_count:
+        raise ValueError("y_mm-Länge passt nicht zum 64×64-Scan-Raster.")
+
+    x_min = float(document["x_min"])
+    x_max = float(document["x_max"])
+
+    return {
+        "json_file": grid_path.name,
+        "profile_count": profile_count,
+        "resolution": resolution,
+        "grid_size": profile_count,
+        "x_min": x_min,
+        "x_max": x_max,
+        "x_reversed": bool(document.get("x_reversed")),
+        "y_mm": y_mm,
+        "y_min": float(document.get("y_min", min(y_mm))),
+        "y_max": float(document.get("y_max", max(y_mm))),
+        "z_scale_min": z_scale_min,
+        "z_scale_max": z_scale_max,
+        "values": values,
+    }
+
+
+def _resolve_64_64_scan_path_for_experiment(experiment_id):
+    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
+    if error:
+        return None, error
+
+    grid_path = _find_generated_file(folder_path, ANALYZE_64_64_SCAN_FILENAME)
+    if grid_path is None:
+        return None, f"{ANALYZE_64_64_SCAN_FILENAME} nicht gefunden in {folder_path.name}."
+
+    return grid_path, None
+
+
 def _resolve_scan_path_for_experiment(experiment_id):
     try:
         scan_filename = _get_experiment_scan_filename(experiment_id)
@@ -1292,6 +1397,88 @@ def _read_h5_dataset_for_graph(dataset, max_points, *, step=None):
     return values
 
 
+def _channel_kind_from_h5_attrs(label, units) -> str:
+    label_l = str(label or "").strip().lower()
+    units_l = str(units or "").strip().lower()
+    if label_l in {"strom", "current"} or units_l in {"a", "amp", "ampere"}:
+        return "current"
+    if label_l in {"spannung", "voltage"} or units_l in {"v", "volt", "volts"}:
+        return "voltage"
+    if label_l in {"power", "leistung"} or units_l in {"w", "watt", "watts"}:
+        return "power"
+    return "unknown"
+
+
+def _infer_legacy_channel_kinds(channels: list[dict[str, object]]) -> None:
+    if not channels:
+        return
+
+    by_key = {str(channel["key"]): channel for channel in channels}
+    channel_0 = by_key.get("channel_0")
+    channel_1 = by_key.get("channel_1")
+    if channel_0 is None or channel_1 is None:
+        return
+
+    kind_0 = str(channel_0.get("kind") or "unknown")
+    kind_1 = str(channel_1.get("kind") or "unknown")
+    if kind_0 != "unknown" and kind_1 != "unknown":
+        return
+
+    # Legacy layout: channel_0 = voltage, channel_1 = current.
+    if kind_0 == "unknown":
+        channel_0["kind"] = "voltage"
+    if kind_1 == "unknown":
+        channel_1["kind"] = "current"
+
+
+def _canonical_weld_channel_name(kind: str, units: str) -> str:
+    unit_text = str(units or "").strip()
+    if kind == "current":
+        return f"Strom [{unit_text or 'A'}]"
+    if kind == "voltage":
+        return f"Spannung [{unit_text or 'V'}]"
+    if kind == "power":
+        return f"Leistung [{unit_text or 'W'}]"
+    return ""
+
+
+def _normalize_weld_graph_channels(channels: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Map H5 channels to canonical German names and stable kind order."""
+    if not channels:
+        return channels
+
+    for channel in channels:
+        label = str(channel.get("label") or "")
+        units = str(channel.get("units") or "")
+        kind = _channel_kind_from_h5_attrs(label, units)
+        channel["kind"] = kind
+
+    _infer_legacy_channel_kinds(channels)
+
+    kind_order = {"current": 0, "voltage": 1, "power": 2, "unknown": 3}
+    channels.sort(
+        key=lambda channel: (
+            kind_order.get(str(channel.get("kind") or "unknown"), 9),
+            str(channel.get("key") or ""),
+        ),
+    )
+
+    normalized: list[dict[str, object]] = []
+    for channel in channels:
+        kind = str(channel.get("kind") or "unknown")
+        units = str(channel.get("units") or "")
+        canonical_name = _canonical_weld_channel_name(kind, units)
+        normalized.append(
+            {
+                "key": channel["key"],
+                "name": canonical_name or str(channel.get("name") or channel["key"]),
+                "kind": kind,
+                "values": channel["values"],
+            }
+        )
+    return normalized
+
+
 def _format_h5_channel_name(dataset, fallback_name):
     label = dataset.attrs.get("label")
     units = dataset.attrs.get("units")
@@ -1338,6 +1525,8 @@ def _load_welding_graph_from_h5(h5_path, *, time_min=None, time_max=None, max_po
             channels.append(
                 {
                     "key": key,
+                    "label": str(dataset.attrs.get("label", key)),
+                    "units": str(dataset.attrs.get("units", "")),
                     "name": _format_h5_channel_name(dataset, key),
                     "values": values[:point_count],
                 }
@@ -1346,6 +1535,8 @@ def _load_welding_graph_from_h5(h5_path, *, time_min=None, time_max=None, max_po
 
     if not channels:
         raise ValueError("Keine Messkanäle in H5-Datei gefunden.")
+
+    channels = _normalize_weld_graph_channels(channels)
 
     full_span = time_bounds["max"] - time_bounds["min"]
     sample_rate_hz = None
@@ -1363,6 +1554,7 @@ def _load_welding_graph_from_h5(h5_path, *, time_min=None, time_max=None, max_po
             {
                 "key": channel["key"],
                 "name": channel["name"],
+                "kind": channel.get("kind"),
                 "values": np.asarray(channel["values"], dtype=float).tolist(),
             }
             for channel in channels
@@ -1734,6 +1926,7 @@ def export_view_values():
             header = column_labels.get(column_key, column_key)
             row[header] = _resolve_view_export_cell(
                 column_key,
+                experiment_id,
                 excel_values,
                 characteristics_map,
             )
@@ -2053,6 +2246,31 @@ def get_generate_heatmap(experiment_id):
         return jsonify(error=str(exc)), 400
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der Analyse-Heatmap: {exc}"), 500
+
+
+@app.get("/api/generate/<experiment_id>/heatmap-64")
+def get_generate_heatmap_64(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        grid_path, error = _resolve_64_64_scan_path_for_experiment(experiment_id)
+        if error:
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith(f"{ANALYZE_64_64_SCAN_FILENAME} nicht gefunden")
+            ) else 400
+            return jsonify(error=error), status
+
+        heatmap_data = _load_grid_scan_heatmap(grid_path)
+        return jsonify(id=experiment_id, **heatmap_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der 64×64-Heatmap: {exc}"), 500
 
 
 @app.get("/api/generate/<experiment_id>/x-profile")
@@ -2399,6 +2617,25 @@ def versuchsuebersicht_status():
         column_count=len(versuchsuebersicht_data["columns"]),
         **status,
     )
+
+
+@app.get("/api/patterns/<path_id>")
+def get_weld_path_pattern(path_id):
+    normalized = str(path_id).strip().upper()
+    if normalized not in VALID_PATH_IDS:
+        return jsonify(error=f"Unbekannte PATH ID: {path_id}"), 400
+
+    pattern_path = PATTERNS_DIR / f"{normalized}.json"
+    if not pattern_path.is_file():
+        return jsonify(error=f"Pfadmuster {normalized} nicht gefunden."), 404
+
+    with pattern_path.open("r", encoding="utf-8") as handle:
+        paths = json.load(handle)
+
+    if not isinstance(paths, list):
+        return jsonify(error=f"Ungültiges Pfadmuster-Format in {normalized}.json."), 500
+
+    return jsonify(path_id=normalized, paths=paths)
 
 
 @app.get("/styles.css")

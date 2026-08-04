@@ -2292,6 +2292,7 @@ body {
 .analyzing-graphs-box .analyzing-heatmap-panel,
 .analyzing-graphs-box .analyzing-export-graph-wrap {
   margin: 0;
+  flex-shrink: 0;
 }
 
 .analyzing-graphs-box .analyzing-characteristics {
@@ -2351,8 +2352,10 @@ body {
   min-height: 6rem;
   margin-top: 0.15rem;
   border-radius: 0.35rem;
-  overflow: hidden;
+  overflow: visible;
   background: #0f172a;
+  display: flex;
+  flex-direction: column;
 }
 
 .analyzing-heatmap-panel[hidden],
@@ -2413,10 +2416,12 @@ body {
   border-bottom: none;
 }
 
-#analyzing-heatmap-canvas {
+#analyzing-heatmap-canvas,
+#analyzing-heatmap-64-canvas {
   display: block;
   width: 100%;
-  height: calc(100% - 1.35rem);
+  height: auto;
+  flex: 0 0 auto;
 }
 
 .analyzing-heatmap-legend {
