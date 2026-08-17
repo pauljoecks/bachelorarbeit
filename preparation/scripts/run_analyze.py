@@ -303,6 +303,7 @@ def resolve_scan_generate_options(options: dict[str, bool]) -> dict[str, bool]:
     if resolved.get("x_profile") or resolved.get("y_profile"):
         resolved["filtered"] = True
     if resolved.get("characteristics"):
+        resolved["filtered"] = True
         resolved["x_profile"] = True
         resolved["y_profile"] = True
     return resolved
@@ -1300,6 +1301,137 @@ def generate_y_profile_document(cropped_scan_document: dict) -> dict:
     return document
 
 
+def compute_filtered_surface_curvature(filtered_scan_document: dict) -> dict | None:
+    """
+    Fit a quadratic surface on filtered z(x, y) and return mean curvature H.
+
+        z(x, y) = a + b x + c y + d x² + e x y + f y²
+
+    Coordinates are in mm; returned curvature is converted to 1/m (κ_m = κ_mm * 1000).
+    Prefer H at a gradient-zero vertex inside the measured domain.
+    Otherwise evaluate H at the centroid of the valid points.
+    """
+    profiles = filtered_scan_document.get("profiles") or []
+    if not profiles:
+        return None
+
+    x_mm = np.asarray(profiles[0].get("x_mm") or [], dtype=float)
+    if x_mm.size == 0 or not np.any(np.isfinite(x_mm)):
+        return None
+
+    try:
+        y_mm = _profile_y_mm_values(profiles)
+    except ValueError:
+        return None
+
+    z_stack, valid_mask = _stack_profile_z_and_valid_mask(profiles)
+    row_ok = np.isfinite(y_mm)
+    if not np.any(row_ok):
+        return None
+    z_stack = z_stack[row_ok]
+    valid_mask = valid_mask[row_ok]
+    y_mm = y_mm[row_ok]
+
+    xx, yy = np.meshgrid(x_mm, y_mm)
+    keep = (
+        valid_mask
+        & np.isfinite(z_stack)
+        & np.isfinite(xx)
+        & np.isfinite(yy)
+        & (z_stack > 0)
+    )
+    if int(np.count_nonzero(keep)) < 6:
+        return None
+
+    x = xx[keep]
+    y = yy[keep]
+    z = z_stack[keep]
+
+    x_mean = float(np.mean(x))
+    y_mean = float(np.mean(y))
+    z_mean = float(np.mean(z))
+    sx = float(np.std(x))
+    sy = float(np.std(y))
+    if sx <= 1e-12 or sy <= 1e-12:
+        return None
+
+    xn = (x - x_mean) / sx
+    yn = (y - y_mean) / sy
+    zn = z - z_mean
+    design = np.column_stack((np.ones(xn.size), xn, yn, xn * xn, xn * yn, yn * yn))
+    try:
+        coeffs, _residuals, rank, _sv = np.linalg.lstsq(design, zn, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    if rank < 6:
+        return None
+
+    _a, b, c, d, e, f = (float(value) for value in coeffs)
+
+    z_hat = design @ coeffs
+    resid = zn - z_hat
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((zn - float(np.mean(zn))) ** 2))
+    r2 = float(1.0 - (ss_res / ss_tot)) if ss_tot > 0 else float("nan")
+    rmse = float(np.sqrt(ss_res / zn.size))
+
+    zxx = 2.0 * d / (sx * sx)
+    zyy = 2.0 * f / (sy * sy)
+    zxy = e / (sx * sy)
+
+    def signed_h(xn_val: np.ndarray, yn_val: np.ndarray) -> np.ndarray:
+        zx = (b + 2.0 * d * xn_val + e * yn_val) / sx
+        zy = (c + e * xn_val + 2.0 * f * yn_val) / sy
+        numer = (1.0 + zy * zy) * zxx - 2.0 * zx * zy * zxy + (1.0 + zx * zx) * zyy
+        denom = 2.0 * np.power(1.0 + zx * zx + zy * zy, 1.5)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return numer / denom
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+
+    def in_domain(x_val: float, y_val: float) -> bool:
+        return x_min <= x_val <= x_max and y_min <= y_val <= y_max
+
+    source = "centroid"
+    x_sel = x_mean
+    y_sel = y_mean
+    kappa = float(signed_h(np.asarray(0.0), np.asarray(0.0)))
+    hess = np.array([[2.0 * d, e], [e, 2.0 * f]], dtype=float)
+    try:
+        xn_star, yn_star = np.linalg.solve(hess, np.array([-b, -c], dtype=float))
+        x_star = float(xn_star * sx + x_mean)
+        y_star = float(yn_star * sy + y_mean)
+        if np.isfinite([x_star, y_star]).all() and in_domain(x_star, y_star):
+            h_star = float(signed_h(np.asarray(xn_star), np.asarray(yn_star)))
+            if np.isfinite(h_star):
+                source = "extremum"
+                x_sel = x_star
+                y_sel = y_star
+                kappa = h_star
+    except np.linalg.LinAlgError:
+        pass
+
+    if not np.isfinite(kappa):
+        return None
+
+    result = {
+        "curvature_1_per_m": round(float(kappa) * 1000.0, 9),
+        "curvature_x_mm": round(float(x_sel), 6),
+        "curvature_y_mm": round(float(y_sel), 6),
+        "curvature_source": source,
+        "point_count": int(z.size),
+        "formula": "z = a + b*x + c*y + d*x^2 + e*x*y + f*y^2",
+    }
+    if np.isfinite(r2):
+        result["r2"] = round(r2, 6)
+    if np.isfinite(rmse):
+        result["rmse"] = round(rmse, 6)
+    return result
+
+
 def _load_weld_h5_channels(h5_path: Path) -> tuple[np.ndarray, list[tuple[str, np.ndarray, str, str]]]:
     with h5py.File(h5_path, "r") as h5_file:
         if "time_s" not in h5_file:
@@ -1447,6 +1579,7 @@ SCAN_CHARACTERISTIC_FIELDS = (
     "Y_curvature",
     "Total_curvature_mean",
     "Total_curvature_rms",
+    "Surface_curvature",
 )
 
 WELD_CURRENT_QUANTITY = "current"
@@ -3395,6 +3528,7 @@ def build_curvature_characteristic_fields(
     y_curvature: float | None = None,
     total_curvature_mean: float | None = None,
     total_curvature_rms: float | None = None,
+    surface_curvature: float | None = None,
 ) -> dict[str, float]:
     fields: dict[str, float] = {}
     if x_curvature is not None and np.isfinite(x_curvature):
@@ -3405,6 +3539,8 @@ def build_curvature_characteristic_fields(
         fields["Total_curvature_mean"] = float(total_curvature_mean)
     if total_curvature_rms is not None and np.isfinite(total_curvature_rms):
         fields["Total_curvature_rms"] = float(total_curvature_rms)
+    if surface_curvature is not None and np.isfinite(surface_curvature):
+        fields["Surface_curvature"] = float(surface_curvature)
     return fields
 
 
@@ -3876,7 +4012,12 @@ def run_analyze_scan(
         result["64_64_scan_file"] = SCAN_64_64_FILENAME
 
     filtered_document = None
-    if options["filtered"] or options["x_profile"] or options["y_profile"]:
+    if (
+        options["filtered"]
+        or options["x_profile"]
+        or options["y_profile"]
+        or options["characteristics"]
+    ):
         filtered_document = generate_filtered_scan_document(document)
         if options["filtered"]:
             _dump_json(scan_dir / FILTERED_SCAN_FILENAME, filtered_document, compact=True)
@@ -3921,6 +4062,11 @@ def run_analyze_scan(
                     **combined,
                 },
             )
+
+    if filtered_document is not None:
+        surface = compute_filtered_surface_curvature(filtered_document)
+        if surface is not None:
+            result["surface_curvature"] = surface["curvature_1_per_m"]
 
     return result
 
@@ -4088,6 +4234,7 @@ def _characteristic_document_from_analyze_result(result: dict) -> dict:
         y_curvature=result.get("y_curvature"),
         total_curvature_mean=result.get("total_curvature_mean"),
         total_curvature_rms=result.get("total_curvature_rms"),
+        surface_curvature=result.get("surface_curvature"),
     )
     weld_rows = list(result.get("weld_characteristic_rows") or [])
     return {"scan": scan_fields, "weld": weld_rows}
@@ -4196,6 +4343,7 @@ def run_analyze(
                 y_curvature=result.get("y_curvature"),
                 total_curvature_mean=result.get("total_curvature_mean"),
                 total_curvature_rms=result.get("total_curvature_rms"),
+                surface_curvature=result.get("surface_curvature"),
             )
         elif existing_doc:
             scan_fields = dict(existing_doc.get("scan") or {})

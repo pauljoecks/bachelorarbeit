@@ -136,22 +136,12 @@
             <p class="menu-table-count">X-Achse</p>
           </div>
           <div class="analyzing-weld-sidebar-toggles">
+            {% for key in target_characteristic_keys %}
             <label class="analyzing-weld-sidebar-toggle">
-              <input type="checkbox" data-export-key="X_curvature" />
-              <span>X_curvature</span>
+              <input type="checkbox" data-export-key="{{ key }}" />
+              <span>{{ key }}</span>
             </label>
-            <label class="analyzing-weld-sidebar-toggle">
-              <input type="checkbox" data-export-key="Y_curvature" />
-              <span>Y_curvature</span>
-            </label>
-            <label class="analyzing-weld-sidebar-toggle">
-              <input type="checkbox" data-export-key="Total_curvature_mean" />
-              <span>Total_curvature_mean</span>
-            </label>
-            <label class="analyzing-weld-sidebar-toggle">
-              <input type="checkbox" data-export-key="Total_curvature_rms" />
-              <span>Total_curvature_rms</span>
-            </label>
+            {% endfor %}
           </div>
         </div>
 
@@ -3824,12 +3814,7 @@
     const viewWfsEl = document.getElementById("analyzing-view-wfs");
     const viewWsEl = document.getElementById("analyzing-view-ws");
     const idInput = document.getElementById("welding-id");
-    const SCAN_EXPORT_KEYS = [
-      "X_curvature",
-      "Y_curvature",
-      "Total_curvature_mean",
-      "Total_curvature_rms",
-    ];
+    const SCAN_EXPORT_KEYS = {{ target_characteristic_keys | tojson }};
     const WELD_EXPORT_KEYS = {{ weld_characteristic_keys | tojson }};
     const Y_SELECTION_PREFIX = "y:";
     const PATH_POINT_STYLES = {
@@ -3851,10 +3836,6 @@
       normalize: false,
       ignoreOutliers: false,
       logX: false,
-      X_curvature: false,
-      Y_curvature: false,
-      Total_curvature_mean: false,
-      Total_curvature_rms: false,
     };
     SCAN_EXPORT_KEYS.forEach((key) => {
       DEFAULT_SELECTION[key] = false;
