@@ -628,8 +628,8 @@
           {
             label: "Höhe z [mm]",
             data: points,
-            borderColor: data.live ? "#34d399" : "#38bdf8",
-            backgroundColor: data.live ? "#34d39933" : "#38bdf833",
+            borderColor: data.live ? "#57AB27" : "#8EBAE5",
+            backgroundColor: data.live ? "#57AB2733" : "#8EBAE533",
             borderWidth: 1.5,
             pointRadius: 0,
             pointHitRadius: 12,
@@ -649,13 +649,13 @@
         plugins: {
           legend: {
             labels: {
-              color: "#f8fafc",
+              color: "#E8F1FA",
             },
           },
           title: {
             display: true,
             text: titleText,
-            color: "#94a3b8",
+            color: "#C7DDF2",
             font: {
               size: 13,
             },
@@ -673,14 +673,14 @@
             title: {
               display: true,
               text: "x [mm]",
-              color: "#94a3b8",
+              color: "#C7DDF2",
             },
             ticks: {
-              color: "#94a3b8",
+              color: "#E8F1FA",
               maxTicksLimit: 8,
             },
             grid: {
-              color: "#334155",
+              color: "#8EBAE5",
             },
           },
           y: {
@@ -688,13 +688,13 @@
             title: {
               display: true,
               text: "z [mm]",
-              color: data.live ? "#34d399" : "#38bdf8",
+              color: data.live ? "#57AB27" : "#C7DDF2",
             },
             ticks: {
-              color: data.live ? "#34d399" : "#38bdf8",
+              color: data.live ? "#57AB27" : "#E8F1FA",
             },
             grid: {
-              color: "#334155",
+              color: "#8EBAE5",
             },
           },
         },
@@ -721,14 +721,14 @@
     }
 
     scanningChart.data.datasets[0].data = points;
-    scanningChart.data.datasets[0].borderColor = "#34d399";
-    scanningChart.data.datasets[0].backgroundColor = "#34d39933";
+    scanningChart.data.datasets[0].borderColor = "#57AB27";
+    scanningChart.data.datasets[0].backgroundColor = "#57AB2733";
     scanningChart.options.plugins.title.text = data.scanning
       ? (data.demo_mode ? "Live-Vorschau während Scan (Demo)" : "Live-Vorschau während Scan")
       : (data.demo_mode ? "Live-Vorschau (Demo)" : "Live-Vorschau");
     scanningChart.options.scales.x.reverse = Boolean(data.live);
-    scanningChart.options.scales.y.title.color = "#34d399";
-    scanningChart.options.scales.y.ticks.color = "#34d399";
+    scanningChart.options.scales.y.title.color = "#57AB27";
+    scanningChart.options.scales.y.ticks.color = "#57AB27";
     scanningChart.update("none");
   }
 
@@ -1287,7 +1287,7 @@
     }
 
     const confirmed = window.confirm(
-      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert, die JSON-Datei aus data/acquesition/scanning und der Generate-Ordner aus data/preparation/generated gelöscht.`
+      `Scan für ID ${id} wirklich zurücksetzen?\n\nSCANNED und JSONFILE werden in Excel geleert, die JSON-Datei aus data/acquesition/scanning und der Generate-Ordner aus data/preparation gelöscht.`
     );
     if (!confirmed) {
       return;

@@ -143,7 +143,7 @@
   const liveVoltageEl = document.getElementById("welding-live-voltage");
   const PATH_ID_OPTIONS = new Set(["SO", "PO", "SI", "ME", "LI"]);
   const RESOLUTION_OPTIONS = {{ resolution_options | tojson }};
-  const GRAPH_COLORS = ["#38bdf8", "#fbbf24"];
+  const GRAPH_COLORS = ["#8EBAE5", "#F6A800"];
   let weldingChart = null;
   let isLiveWeldingChart = false;
   let liveWeldPlotSince = 0;
@@ -370,14 +370,14 @@
         title: {
           display: true,
           text: "Zeit [s]",
-          color: "#94a3b8",
+          color: "#C7DDF2",
         },
         ticks: {
-          color: "#94a3b8",
+          color: "#C7DDF2",
           maxTicksLimit: 8,
         },
         grid: {
-          color: "#334155",
+          color: "#8EBAE5",
         },
       },
       "y-0": {
@@ -392,7 +392,7 @@
           color: GRAPH_COLORS[0],
         },
         grid: {
-          color: "#334155",
+          color: "#8EBAE5",
           drawOnChartArea: true,
         },
       },
@@ -408,7 +408,7 @@
           color: GRAPH_COLORS[1],
         },
         grid: {
-          color: "#334155",
+          color: "#8EBAE5",
           drawOnChartArea: false,
         },
       },
@@ -466,13 +466,13 @@
         plugins: {
           legend: {
             labels: {
-              color: "#f8fafc",
+              color: "#E8F1FA",
             },
           },
           title: {
             display: true,
             text: "Live-Aufnahme",
-            color: "#94a3b8",
+            color: "#C7DDF2",
             font: {
               size: 13,
             },
@@ -544,14 +544,14 @@
         title: {
           display: true,
           text: "Zeit [s]",
-          color: "#94a3b8",
+          color: "#C7DDF2",
         },
         ticks: {
-          color: "#94a3b8",
+          color: "#C7DDF2",
           maxTicksLimit: 8,
         },
         grid: {
-          color: "#334155",
+          color: "#8EBAE5",
         },
       },
     };
@@ -572,7 +572,7 @@
           color,
         },
         grid: {
-          color: "#334155",
+          color: "#8EBAE5",
           drawOnChartArea: index === 0,
         },
       };
@@ -609,13 +609,13 @@
         plugins: {
           legend: {
             labels: {
-              color: "#f8fafc",
+              color: "#E8F1FA",
             },
           },
           title: {
             display: true,
             text: data.h5file,
-            color: "#94a3b8",
+            color: "#C7DDF2",
             font: {
               size: 13,
             },

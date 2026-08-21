@@ -1,0 +1,453 @@
+{% extends "base.html" %}
+
+{% block title %}evaluate · evaluation{% endblock %}
+
+{% block content %}
+{% if not model_name %}
+<p class="status">Oben einen Modellordner laden.</p>
+{% elif train_overview and train_overview.error %}
+<p class="status error">{{ train_overview.error }}</p>
+{% else %}
+<section class="inputs">
+  <p class="lede">
+    {{ model_name }}
+    {% if train_overview and train_overview.n_rows is not none %}
+    · {{ train_overview.n_rows }} Zeilen in train.xlsx
+    {% endif %}
+  </p>
+  <p id="selection-status" class="status" role="status"></p>
+  <div class="evaluate-layout">
+  <div class="category-stack">
+    {% for group in train_overview.groups %}
+    <section class="category-panel" data-category="{{ group.category }}">
+      <div class="category-header">
+        <h2>{{ group.category }}</h2>
+        {% if group.allows_constraints %}
+        <label class="category-min">
+          min.
+          <input
+            type="number"
+            class="category-min-input"
+            data-category="{{ group.category }}"
+            min="0"
+            max="{{ group.columns|selectattr('pinnable')|list|length }}"
+            value="{{ selection.min_per_category.get(group.category, 0) }}"
+            aria-label="Mindestzahl Kennwerte {{ group.category }}"
+          />
+        </label>
+        {% endif %}
+      </div>
+      <div class="table-wrap">
+        <table class="input-table">
+          <thead>
+            <tr>
+              <th scope="col">Größe</th>
+              {% if group.allows_constraints %}
+              <th scope="col">Fest</th>
+              {% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for column in group.columns %}
+            <tr>
+              <th scope="row">{{ column.name }}</th>
+              {% if group.allows_constraints %}
+              <td>
+                {% if column.pinnable %}
+                <label class="pin-label">
+                  <input
+                    type="checkbox"
+                    class="pin-input"
+                    data-column="{{ column.name }}"
+                    {% if column.name in selection.pinned %}checked{% endif %}
+                  />
+                  <span class="visually-hidden">{{ column.name }} festsetzen</span>
+                </label>
+                {% else %}
+                <span class="pin-na">–</span>
+                {% endif %}
+              </td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% else %}
+    <p class="status">train.xlsx enthält keine Spalten.</p>
+    {% endfor %}
+  </div>
+  <aside class="settings-panel" aria-label="Einstellungen">
+    <h2>Einstellungen</h2>
+    <div class="settings-fields">
+      <label class="settings-field">
+        <span>Modell</span>
+        <select id="setting-learner" class="settings-select">
+          {% for value, label in learner_options %}
+          <option value="{{ value }}" {% if selection.learner == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="settings-field">
+        <span>Kreuzvalidierung</span>
+        <select id="setting-cv" class="settings-select">
+          {% for value, label in cv_options %}
+          <option value="{{ value }}" {% if selection.cv == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="settings-field" id="setting-folds-field">
+        <span>Folds</span>
+        <input
+          id="setting-cv-folds"
+          class="settings-input"
+          type="number"
+          min="2"
+          max="20"
+          value="{{ selection.cv_folds }}"
+        />
+      </label>
+      <label class="settings-field">
+        <span>Kennwerte</span>
+        <select id="setting-feature-k-mode" class="settings-select">
+          <option value="manual" {% if selection.feature_k_mode != "auto" %}selected{% endif %}>Manuell</option>
+          <option value="auto" {% if selection.feature_k_mode == "auto" %}selected{% endif %}>Automatisch (8 / 12 / 16 / 20 / 24)</option>
+        </select>
+      </label>
+      <label class="settings-field" id="setting-feature-k-field">
+        <span>Anzahl</span>
+        <input
+          id="setting-feature-k"
+          class="settings-input"
+          type="number"
+          min="1"
+          max="200"
+          value="{{ selection.feature_k }}"
+          aria-label="Anzahl Kennwerte nach Feature-Selection"
+        />
+      </label>
+    </div>
+  </aside>
+  <div class="train-column">
+    <button type="button" id="start-train" class="train-button">Train</button>
+    <aside class="status-panel" aria-label="Trainingsstatus">
+    <div class="status-panel-head">
+      <h2>Status</h2>
+      <span id="train-state" class="status-badge idle">Bereit</span>
+    </div>
+    <dl class="status-facts">
+      <div>
+        <dt>Phase</dt>
+        <dd id="train-phase">–</dd>
+      </div>
+      <div>
+        <dt>Fortschritt</dt>
+        <dd id="train-progress">–</dd>
+      </div>
+      <div>
+        <dt>Aktuell</dt>
+        <dd id="train-current">–</dd>
+      </div>
+      <div>
+        <dt>Letztes Ergebnis</dt>
+        <dd id="train-metrics">–</dd>
+      </div>
+      <div>
+        <dt>Laufzeit</dt>
+        <dd id="train-elapsed">–</dd>
+      </div>
+    </dl>
+    <p id="train-message" class="status-message">Noch kein Training gestartet.</p>
+    <div class="status-log-head">
+      <span>Protokoll</span>
+      <span id="train-log-file" class="status-log-file">train.log</span>
+    </div>
+    <pre id="train-log" class="status-log" aria-live="polite"></pre>
+  </aside>
+  </div>
+  </div>
+</section>
+<script>
+  (function () {
+    const statusEl = document.getElementById("selection-status");
+    const pinInputs = Array.from(document.querySelectorAll(".pin-input"));
+    const minInputs = Array.from(document.querySelectorAll(".category-min-input"));
+    const learnerSelect = document.getElementById("setting-learner");
+    const cvSelect = document.getElementById("setting-cv");
+    const foldsInput = document.getElementById("setting-cv-folds");
+    const foldsField = document.getElementById("setting-folds-field");
+    const featureKInput = document.getElementById("setting-feature-k");
+    const featureKField = document.getElementById("setting-feature-k-field");
+    const featureKModeSelect = document.getElementById("setting-feature-k-mode");
+    const startTrainBtn = document.getElementById("start-train");
+    const trainStateEl = document.getElementById("train-state");
+    const trainPhaseEl = document.getElementById("train-phase");
+    const trainProgressEl = document.getElementById("train-progress");
+    const trainCurrentEl = document.getElementById("train-current");
+    const trainMetricsEl = document.getElementById("train-metrics");
+    const trainElapsedEl = document.getElementById("train-elapsed");
+    const trainMessageEl = document.getElementById("train-message");
+    const trainLogEl = document.getElementById("train-log");
+    const trainLogFileEl = document.getElementById("train-log-file");
+    let saveTimer = null;
+    let pollTimer = null;
+    let lastLogText = "";
+
+    const STATE_LABELS = {
+      idle: "Bereit",
+      running: "Läuft",
+      done: "Fertig",
+      error: "Fehler",
+    };
+
+    function setStatus(message, type) {
+      if (!statusEl) {
+        return;
+      }
+      statusEl.textContent = message || "";
+      statusEl.className = type ? `status ${type}` : "status";
+    }
+
+    function formatNumber(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return "–";
+      }
+      const number = Number(value);
+      if (!Number.isFinite(number)) {
+        return "–";
+      }
+      return number.toLocaleString("de-DE", { maximumFractionDigits: 4 });
+    }
+
+    function formatElapsed(seconds) {
+      if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) {
+        return "–";
+      }
+      const total = Math.max(0, Math.floor(Number(seconds)));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const rest = total % 60;
+      if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+      }
+      return `${minutes}:${String(rest).padStart(2, "0")}`;
+    }
+
+    function renderTrainStatus(payload) {
+      const state = payload?.state || "idle";
+      if (trainStateEl) {
+        trainStateEl.textContent = STATE_LABELS[state] || state;
+        trainStateEl.className = `status-badge ${state}`;
+      }
+      if (trainPhaseEl) {
+        trainPhaseEl.textContent = payload?.phase || "–";
+      }
+      const progress = payload?.progress || {};
+      if (trainProgressEl) {
+        if (progress.total) {
+          const unit = progress.unit ? ` ${progress.unit}` : "";
+          trainProgressEl.textContent = `${progress.current || 0} / ${progress.total}${unit}`;
+        } else if (payload?.state === "running") {
+          trainProgressEl.textContent = "läuft";
+        } else {
+          trainProgressEl.textContent = "–";
+        }
+      }
+      const current = payload?.current || {};
+      if (trainCurrentEl) {
+        const parts = [];
+        if (current.target) {
+          parts.push(current.target);
+        }
+        if (current.k != null) {
+          parts.push(`k=${current.k}`);
+        }
+        if (current.fold) {
+          parts.push(`Fold ${current.fold}`);
+        }
+        trainCurrentEl.textContent = parts.join(" · ") || "–";
+      }
+      const metrics = payload?.last_metrics;
+      if (trainMetricsEl) {
+        if (metrics && metrics.mean_cv_rmse != null) {
+          trainMetricsEl.textContent =
+            `${metrics.target || ""}`.trim() +
+            ` · CV-RMSE ${formatNumber(metrics.mean_cv_rmse)}`;
+        } else {
+          trainMetricsEl.textContent = "–";
+        }
+      }
+      if (trainElapsedEl) {
+        trainElapsedEl.textContent = formatElapsed(payload?.elapsed_s);
+      }
+      if (trainMessageEl) {
+        trainMessageEl.textContent = payload?.message || "–";
+      }
+      if (trainLogFileEl) {
+        trainLogFileEl.textContent = payload?.log_file || "train.log";
+      }
+      if (trainLogEl) {
+        const text = (payload?.log_tail || []).join("\n");
+        if (text !== lastLogText) {
+          lastLogText = text;
+          trainLogEl.textContent = text || "Noch keine Einträge.";
+          trainLogEl.scrollTop = trainLogEl.scrollHeight;
+        }
+      }
+      if (startTrainBtn) {
+        startTrainBtn.disabled = state === "running";
+      }
+    }
+
+    async function fetchTrainStatus() {
+      try {
+        const response = await fetch("/api/train/status");
+        const payload = await response.json();
+        renderTrainStatus(payload);
+        return payload;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function startPolling() {
+      window.clearInterval(pollTimer);
+      pollTimer = window.setInterval(async () => {
+        const payload = await fetchTrainStatus();
+        if (payload && payload.state !== "running") {
+          window.clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }, 700);
+    }
+
+    function syncFoldVisibility() {
+      const needsFolds = cvSelect?.value === "kfold" || cvSelect?.value === "random";
+      if (foldsField) {
+        foldsField.hidden = !needsFolds;
+      }
+    }
+
+    function syncFeatureKVisibility() {
+      const automatic = featureKModeSelect?.value === "auto";
+      if (featureKField) {
+        featureKField.hidden = automatic;
+      }
+    }
+
+    function currentSelection() {
+      return {
+        pinned: pinInputs.filter((input) => input.checked).map((input) => input.dataset.column).filter(Boolean),
+        min_per_category: Object.fromEntries(
+          minInputs.map((input) => [input.dataset.category, Number(input.value) || 0])
+        ),
+        learner: learnerSelect?.value || "elasticnet",
+        cv: cvSelect?.value || "lopo",
+        cv_folds: Number(foldsInput?.value) || 5,
+        feature_k: Number(featureKInput?.value) || 16,
+        feature_k_mode: featureKModeSelect?.value || "manual",
+      };
+    }
+
+    async function saveSelection() {
+      setStatus("Speichere …", "loading");
+      try {
+        const response = await fetch("/api/models/selection", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(currentSelection()),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.error || "Speichern fehlgeschlagen.", "error");
+          return;
+        }
+        setStatus("Gespeichert.", "success");
+      } catch (error) {
+        setStatus("Verbindungsfehler.", "error");
+      }
+    }
+
+    function scheduleSave() {
+      window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(saveSelection, 250);
+    }
+
+    pinInputs.forEach((input) => input.addEventListener("change", scheduleSave));
+    learnerSelect?.addEventListener("change", scheduleSave);
+    cvSelect?.addEventListener("change", () => {
+      syncFoldVisibility();
+      scheduleSave();
+    });
+    foldsInput?.addEventListener("input", () => {
+      const value = Number(foldsInput.value);
+      if (value > 20) {
+        foldsInput.value = "20";
+      }
+      if (value < 2) {
+        foldsInput.value = "2";
+      }
+      scheduleSave();
+    });
+    featureKModeSelect?.addEventListener("change", () => {
+      syncFeatureKVisibility();
+      scheduleSave();
+    });
+    featureKInput?.addEventListener("input", () => {
+      const value = Number(featureKInput.value);
+      if (value > 200) {
+        featureKInput.value = "200";
+      }
+      if (value < 1) {
+        featureKInput.value = "1";
+      }
+      scheduleSave();
+    });
+    minInputs.forEach((input) => {
+      input.addEventListener("input", () => {
+        const max = Number(input.max);
+        if (Number.isFinite(max) && Number(input.value) > max) {
+          input.value = String(max);
+        }
+        if (Number(input.value) < 0) {
+          input.value = "0";
+        }
+        scheduleSave();
+      });
+    });
+    startTrainBtn?.addEventListener("click", async () => {
+      setStatus("Starte Training …", "loading");
+      startTrainBtn.disabled = true;
+      try {
+        await saveSelection();
+        const response = await fetch("/api/train", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.error || "Training konnte nicht starten.", "error");
+          startTrainBtn.disabled = false;
+          return;
+        }
+        setStatus("Training läuft.", "loading");
+        startPolling();
+        fetchTrainStatus();
+      } catch (error) {
+        setStatus("Verbindungsfehler.", "error");
+        startTrainBtn.disabled = false;
+      }
+    });
+    syncFoldVisibility();
+    syncFeatureKVisibility();
+    fetchTrainStatus().then((payload) => {
+      if (payload?.state === "running") {
+        startPolling();
+      }
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

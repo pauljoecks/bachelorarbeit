@@ -43,7 +43,7 @@ versuchsuebersicht_path: str | None = None
 versuchsuebersicht_data: dict | None = None
 _scan_document_cache: dict = {}
 
-GENERATE_DATA_DIR = DEFAULT_DATA_DIR / PREPARATION_DATA_DIR_NAME / "generated"
+GENERATE_DATA_DIR = DEFAULT_DATA_DIR / PREPARATION_DATA_DIR_NAME
 ACQUESITION_WELDING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "welding"
 ACQUESITION_SCANNING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "scanning"
 
@@ -62,29 +62,30 @@ VIEW_EXCEL_VALUE_FIELDS = (
     ("SERIES", "series"),
     ("NUMBER", "number"),
 )
-VIEW_VECTOR_EXPORT_KEYS = frozenset({"path_id_vector", "64_64_scan"})
 VIEW_META_KEYS = frozenset(key for _column, key in VIEW_EXCEL_VALUE_FIELDS)
+VIEW_VALUE_CATEGORY_DEFAULT = "Default"
+VIEW_VALUE_CATEGORY_TARGET = "Zielgröße"
+VIEW_VALUE_CATEGORY_PATH = "Pfad"
+VIEW_VALUE_CATEGORY_WELD = "Weld"
 MENU_FILTER_OPTIONS = ["WELDED", "SCANNED", "ID"]
 SCANSPEED_COLUMN = "SCANSPEED [mm/s]"
 ANALYZE_SCAN_FILENAME = "cropped_scan.json"
+ANALYZE_CROPPED_CENTER_FILENAME = "cropped_center.json"
 ANALYZE_WELD_FILENAME = "cropped_weld.h5"
 ANALYZE_POWER_FILENAME = "power.h5"
 ANALYZE_CHARACTERISTICS_FILENAME = "characteristics.json"
 ANALYZE_GRENZEN_FILENAME = "grenzen.json"
 ANALYZE_CHAR_GRAPHEN_FILENAME = "char_graphen.json"
-ANALYZE_FILTERED_FILENAME = "filtered.json"
 ANALYZE_X_PROFILE_FILENAME = "X_profile.json"
 ANALYZE_Y_PROFILE_FILENAME = "Y_profile.json"
-ANALYZE_64_64_SCAN_FILENAME = "64_64_scan.json"
 GENERATE_SCAN_SUBDIR = "scan"
 GENERATE_WELD_SUBDIR = "weld"
 _GENERATE_SCAN_FILES = frozenset(
     {
         ANALYZE_SCAN_FILENAME,
-        ANALYZE_FILTERED_FILENAME,
+        ANALYZE_CROPPED_CENTER_FILENAME,
         ANALYZE_X_PROFILE_FILENAME,
         ANALYZE_Y_PROFILE_FILENAME,
-        ANALYZE_64_64_SCAN_FILENAME,
     }
 )
 _GENERATE_WELD_FILES = frozenset(
@@ -194,7 +195,7 @@ def _configure_data_dirs(root: Path) -> None:
     global ACQUESITION_WELDING_DATA_DIR, ACQUESITION_SCANNING_DATA_DIR
 
     data_dir = root.resolve()
-    GENERATE_DATA_DIR = data_dir / PREPARATION_DATA_DIR_NAME / "generated"
+    GENERATE_DATA_DIR = data_dir / PREPARATION_DATA_DIR_NAME
     ACQUESITION_WELDING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "welding"
     ACQUESITION_SCANNING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "scanning"
     GENERATE_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -601,9 +602,9 @@ def _get_view_excel_values_for_row(row):
 
 def _get_view_value_column_labels() -> dict[str, str]:
     labels = {key: column_name for column_name, key in VIEW_EXCEL_VALUE_FIELDS}
-    labels["path_id_vector"] = "PATH ID Vektor"
-    labels["64_64_scan"] = "64_64_scan"
     for key in _get_target_characteristic_keys():
+        labels[key] = key
+    for key in _get_path_characteristic_keys():
         labels[key] = key
     for key in _get_weld_characteristic_keys():
         labels[key] = key
@@ -613,46 +614,28 @@ def _get_view_value_column_labels() -> dict[str, str]:
 def _get_view_value_column_order() -> tuple[str, ...]:
     meta_keys = tuple(key for _column_name, key in VIEW_EXCEL_VALUE_FIELDS)
     return (
-        meta_keys
-        + ("path_id_vector",)
-        + _get_target_characteristic_keys()
-        + ("64_64_scan",)
+        _get_target_characteristic_keys()
+        + meta_keys
+        + _get_path_characteristic_keys()
         + _get_weld_characteristic_keys()
     )
 
 
-def _serialize_path_id_vector(path_id: str | None) -> str | None:
-    normalized = str(path_id or "").strip().upper()
-    if normalized not in VALID_PATH_IDS:
-        return None
-
-    pattern_path = PATTERNS_DIR / f"{normalized}.json"
-    if not pattern_path.is_file():
-        return None
-
-    with pattern_path.open("r", encoding="utf-8") as handle:
-        paths = json.load(handle)
-    if not isinstance(paths, list):
-        return None
-    return json.dumps(paths, ensure_ascii=False, separators=(",", ":"))
+def _get_view_value_column_categories() -> dict[str, str]:
+    categories: dict[str, str] = {}
+    for _column_name, key in VIEW_EXCEL_VALUE_FIELDS:
+        categories[key] = VIEW_VALUE_CATEGORY_DEFAULT
+    for key in _get_target_characteristic_keys():
+        categories[key] = VIEW_VALUE_CATEGORY_TARGET
+    for key in _get_path_characteristic_keys():
+        categories[key] = VIEW_VALUE_CATEGORY_PATH
+    for key in _get_weld_characteristic_keys():
+        categories[key] = VIEW_VALUE_CATEGORY_WELD
+    return categories
 
 
-def _serialize_64_64_scan_values(experiment_id: str) -> str | None:
-    grid_path, error = _resolve_64_64_scan_path_for_experiment(experiment_id)
-    if error or grid_path is None:
-        return None
-
-    with grid_path.open("r", encoding="utf-8") as handle:
-        document = json.load(handle)
-
-    values = document.get("values")
-    if not isinstance(values, list):
-        return None
-    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
-
-
-def _characteristics_document_to_value_map(document) -> dict[str, float]:
-    values: dict[str, float] = {}
+def _characteristics_document_to_value_map(document) -> dict[str, float | str]:
+    values: dict[str, float | str] = {}
     if not isinstance(document, dict):
         return values
 
@@ -676,6 +659,14 @@ def _characteristics_document_to_value_map(document) -> dict[str, float]:
                     number = float(value)
                     if np.isfinite(number):
                         values[str(key)] = number
+
+    path_fields = document.get("path")
+    if isinstance(path_fields, dict):
+        for key, value in path_fields.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                number = float(value)
+                if np.isfinite(number):
+                    values[str(key)] = number
     return values
 
 
@@ -683,12 +674,8 @@ def _resolve_view_export_cell(
     column_key: str,
     experiment_id: str,
     excel_values: dict[str, str],
-    characteristics_map: dict[str, float],
+    characteristics_map: dict[str, float | str],
 ):
-    if column_key == "path_id_vector":
-        return _serialize_path_id_vector(excel_values.get("path_id"))
-    if column_key == "64_64_scan":
-        return _serialize_64_64_scan_values(experiment_id)
     if column_key in VIEW_META_KEYS:
         value = excel_values.get(column_key, "")
         return value if value not in (None, "") else None
@@ -1052,65 +1039,6 @@ def _load_generate_scan_heatmap(analyze_path):
     }
 
 
-def _load_grid_scan_heatmap(grid_path):
-    with grid_path.open("r", encoding="utf-8") as handle:
-        document = json.load(handle)
-
-    profile_count = int(document.get("profile_count") or document.get("grid_size") or 0)
-    resolution = int(document.get("resolution") or document.get("grid_size") or 0)
-    values = [float(value) for value in document.get("values") or []]
-    if profile_count <= 0 or resolution <= 0 or len(values) != profile_count * resolution:
-        raise ValueError("Ungültiges 64×64-Scan-Raster.")
-
-    positive_values = [value for value in values if value > 0]
-    z_scale_min = 0.0
-    z_scale_max = 0.0
-    if positive_values:
-        sorted_values = sorted(positive_values)
-        lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
-        upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
-        z_scale_min = float(sorted_values[lower_index])
-        z_scale_max = float(sorted_values[upper_index])
-        if z_scale_max <= z_scale_min:
-            z_scale_min = float(sorted_values[0])
-            z_scale_max = float(sorted_values[-1])
-
-    y_mm = [float(value) for value in document.get("y_mm") or []]
-    if len(y_mm) != profile_count:
-        raise ValueError("y_mm-Länge passt nicht zum 64×64-Scan-Raster.")
-
-    x_min = float(document["x_min"])
-    x_max = float(document["x_max"])
-
-    return {
-        "json_file": grid_path.name,
-        "profile_count": profile_count,
-        "resolution": resolution,
-        "grid_size": profile_count,
-        "x_min": x_min,
-        "x_max": x_max,
-        "x_reversed": bool(document.get("x_reversed")),
-        "y_mm": y_mm,
-        "y_min": float(document.get("y_min", min(y_mm))),
-        "y_max": float(document.get("y_max", max(y_mm))),
-        "z_scale_min": z_scale_min,
-        "z_scale_max": z_scale_max,
-        "values": values,
-    }
-
-
-def _resolve_64_64_scan_path_for_experiment(experiment_id):
-    folder_path, error = _resolve_analyze_folder_for_experiment(experiment_id)
-    if error:
-        return None, error
-
-    grid_path = _find_generated_file(folder_path, ANALYZE_64_64_SCAN_FILENAME)
-    if grid_path is None:
-        return None, f"{ANALYZE_64_64_SCAN_FILENAME} nicht gefunden in {folder_path.name}."
-
-    return grid_path, None
-
-
 def _resolve_scan_path_for_experiment(experiment_id):
     try:
         scan_filename = _get_experiment_scan_filename(experiment_id)
@@ -1249,7 +1177,7 @@ def _current_stats_for_cropped_weld(analyze_weld_path):
             run_analyze = _import_run_analyze()
             document = run_analyze.load_characteristics(characteristics_path)
             for item in document.get("weld") or []:
-                if run_analyze._normalize_weld_quantity(item.get("quantity")) != run_analyze.WELD_CURRENT_QUANTITY:
+                if run_analyze._weld_row_kind(item) != run_analyze.WELD_CURRENT_QUANTITY:
                     continue
                 result = {"unit": "A"}
                 for field in run_analyze.WELD_CURRENT_STAT_FIELDS:
@@ -1721,11 +1649,7 @@ def _current_row_from_characteristics_document(document) -> dict | None:
         return None
     run_analyze = _import_run_analyze()
     for item in document.get("weld") or []:
-        if (
-            isinstance(item, dict)
-            and run_analyze._normalize_weld_quantity(item.get("quantity"))
-            == run_analyze.WELD_CURRENT_QUANTITY
-        ):
+        if isinstance(item, dict) and run_analyze._weld_row_kind(item) == run_analyze.WELD_CURRENT_QUANTITY:
             return item
     return None
 
@@ -1799,6 +1723,10 @@ def _get_weld_characteristic_keys() -> tuple[str, ...]:
     return _import_run_analyze().list_weld_characteristic_keys()
 
 
+def _get_path_characteristic_keys() -> tuple[str, ...]:
+    return _import_run_analyze().list_path_characteristic_keys()
+
+
 @app.context_processor
 def inject_nav_context():
     return {
@@ -1809,6 +1737,8 @@ def inject_nav_context():
         "characteristic_rows": _get_characteristic_keys(),
         "target_characteristic_keys": _get_target_characteristic_keys(),
         "weld_characteristic_keys": _get_weld_characteristic_keys(),
+        "path_characteristic_keys": _get_path_characteristic_keys(),
+        "view_value_column_categories": _get_view_value_column_categories(),
         "scan_generate_keys": _import_run_analyze().SCAN_GENERATE_KEYS,
         "weld_generate_keys": _import_run_analyze().WELD_GENERATE_KEYS,
     }
@@ -1899,6 +1829,17 @@ def export_view_values():
     if not columns:
         return jsonify(error="Keine gültigen Spalten für den Export ausgewählt."), 400
 
+    target_keys = set(_get_target_characteristic_keys())
+    filtered_columns: list[str] = []
+    target_seen = False
+    for key in columns:
+        if key in target_keys:
+            if target_seen:
+                continue
+            target_seen = True
+        filtered_columns.append(key)
+    columns = filtered_columns
+
     experiment_ids: list[str] = []
     for raw_id in raw_ids:
         normalized = _normalize_id(raw_id)
@@ -1907,11 +1848,24 @@ def export_view_values():
     if not experiment_ids:
         return jsonify(error="Keine gültigen IDs für den Export angegeben."), 400
 
-    export_rows = []
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+
+    value_columns = [key for key in valid_column_order if key in set(columns)]
+    sheet_headers = [column_labels[key] for key in value_columns]
+    column_categories = _get_view_value_column_categories()
+    sheet_categories = [column_categories.get(key, "") for key in value_columns]
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "values"
+    sheet.append(sheet_headers)
+    sheet.append(sheet_categories)
+
     for experiment_id in experiment_ids:
         source_row = versuchsuebersicht_data["id_index"].get(experiment_id)
         excel_values = _get_view_excel_values_for_row(source_row)
-        characteristics_map: dict[str, float] = {}
+        characteristics_map: dict[str, float | str] = {}
         try:
             _path, document, error = _load_analyze_characteristics_document(experiment_id)
             if not error and document:
@@ -1919,25 +1873,41 @@ def export_view_values():
         except Exception:
             characteristics_map = {}
 
-        row = {"ID": experiment_id}
-        for column_key in columns:
-            if column_key == "id":
-                continue
-            header = column_labels.get(column_key, column_key)
-            row[header] = _resolve_view_export_cell(
-                column_key,
-                experiment_id,
-                excel_values,
-                characteristics_map,
+        row = []
+        for column_key in value_columns:
+            row.append(
+                _resolve_view_export_cell(
+                    column_key,
+                    experiment_id,
+                    excel_values,
+                    characteristics_map,
+                )
             )
-        export_rows.append(row)
+        sheet.append(row)
 
-    value_columns = [key for key in columns if key != "id"]
-    sheet_columns = ["ID"] + [column_labels[key] for key in value_columns]
-    dataframe = pd.DataFrame(export_rows, columns=sheet_columns)
+    for column_index in range(1, len(sheet_headers) + 1):
+        header_cell = sheet.cell(1, column_index)
+        header_cell.font = Font(bold=True)
+
+    index = 0
+    while index < len(sheet_categories):
+        run_end = index + 1
+        while run_end < len(sheet_categories) and sheet_categories[run_end] == sheet_categories[index]:
+            run_end += 1
+        if run_end - index > 1:
+            sheet.merge_cells(
+                start_row=2,
+                start_column=index + 1,
+                end_row=2,
+                end_column=run_end,
+            )
+        cell = sheet.cell(2, index + 1)
+        cell.font = Font(color="FF64748B")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        index = run_end
+
     buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        dataframe.to_excel(writer, index=False, sheet_name="values")
+    workbook.save(buffer)
     buffer.seek(0)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2021,9 +1991,9 @@ def run_generate(experiment_id):
         scan_duration_s = None
         if scan_path is not None:
             scan_speed_mm_s, scan_duration_s = _get_scan_geometry_from_row(row)
-        weld_speed_m_per_min = None
-        if h5_path is not None:
-            weld_speed_m_per_min = _get_weld_speed_m_per_min_from_row(row)
+        weld_params = _get_generate_weld_params_from_row(row)
+        weld_speed_m_per_min = weld_params.get("ws_m_per_min")
+        path_id = weld_params.get("path_id")
 
         existing_folder_name = _get_experiment_analyze_folder(experiment_id)
         output_folder = None
@@ -2050,6 +2020,7 @@ def run_generate(experiment_id):
             scan_generate_options=scan_generate_options,
             weld_generate_options=weld_generate_options,
             output_folder=output_folder,
+            path_id=path_id,
         )
         result["has_analyze"] = _experiment_has_valid_analyze(experiment_id)
         if deleted_artifacts:
@@ -2187,8 +2158,8 @@ def get_generate_graph(experiment_id):
         return jsonify(error=f"Fehler beim Lesen der Analyse-Datei: {exc}"), 500
 
 
-@app.get("/api/generate/<experiment_id>/filtered")
-def get_generate_filtered(experiment_id):
+@app.get("/api/generate/<experiment_id>/graph-center")
+def get_generate_graph_center(experiment_id):
     if versuchsuebersicht_data is None:
         return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
 
@@ -2200,19 +2171,19 @@ def get_generate_filtered(experiment_id):
         return jsonify(error="Profilindex muss >= 0 sein."), 400
 
     try:
-        filtered_path, error = _resolve_analyze_profile_path_for_experiment(
+        center_path, error = _resolve_analyze_profile_path_for_experiment(
             experiment_id,
-            ANALYZE_FILTERED_FILENAME,
+            ANALYZE_CROPPED_CENTER_FILENAME,
         )
         if error:
             status = 404 if (
                 error.startswith("Kein Analyse-Ordner")
-                or error.startswith(f"{ANALYZE_FILTERED_FILENAME} nicht gefunden")
+                or error.startswith(f"{ANALYZE_CROPPED_CENTER_FILENAME} nicht gefunden")
             ) else 400
             return jsonify(error=error), status
 
         graph_data = _load_scanning_profile_graph(
-            filtered_path,
+            center_path,
             profile_index,
             **_scan_graph_kwargs_from_request(),
         )
@@ -2220,7 +2191,7 @@ def get_generate_filtered(experiment_id):
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
     except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_FILTERED_FILENAME}: {exc}"), 500
+        return jsonify(error=f"Fehler beim Lesen von {ANALYZE_CROPPED_CENTER_FILENAME}: {exc}"), 500
 
 
 @app.get("/api/generate/<experiment_id>/heatmap")
@@ -2248,8 +2219,8 @@ def get_generate_heatmap(experiment_id):
         return jsonify(error=f"Fehler beim Lesen der Analyse-Heatmap: {exc}"), 500
 
 
-@app.get("/api/generate/<experiment_id>/heatmap-64")
-def get_generate_heatmap_64(experiment_id):
+@app.get("/api/generate/<experiment_id>/heatmap-center")
+def get_generate_heatmap_center(experiment_id):
     if versuchsuebersicht_data is None:
         return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
 
@@ -2257,20 +2228,23 @@ def get_generate_heatmap_64(experiment_id):
         return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
 
     try:
-        grid_path, error = _resolve_64_64_scan_path_for_experiment(experiment_id)
+        center_path, error = _resolve_analyze_profile_path_for_experiment(
+            experiment_id,
+            ANALYZE_CROPPED_CENTER_FILENAME,
+        )
         if error:
             status = 404 if (
                 error.startswith("Kein Analyse-Ordner")
-                or error.startswith(f"{ANALYZE_64_64_SCAN_FILENAME} nicht gefunden")
+                or error.startswith(f"{ANALYZE_CROPPED_CENTER_FILENAME} nicht gefunden")
             ) else 400
             return jsonify(error=error), status
 
-        heatmap_data = _load_grid_scan_heatmap(grid_path)
+        heatmap_data = _load_generate_scan_heatmap(center_path)
         return jsonify(id=experiment_id, **heatmap_data)
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
     except Exception as exc:
-        return jsonify(error=f"Fehler beim Lesen der 64×64-Heatmap: {exc}"), 500
+        return jsonify(error=f"Fehler beim Lesen der cropped_center-Heatmap: {exc}"), 500
 
 
 @app.get("/api/generate/<experiment_id>/x-profile")
@@ -2523,11 +2497,15 @@ def get_generate_characteristics(experiment_id):
         if not isinstance(scan_fields, dict):
             return jsonify(error="Ungültiges Characteristics-JSON: scan muss ein Objekt sein."), 400
         weld_rows = list((document or {}).get("weld") or [])
+        path_fields = dict((document or {}).get("path") or {})
+        if not isinstance(path_fields, dict):
+            path_fields = {}
         return jsonify(
             id=experiment_id,
             file=characteristics_path.name,
             scan=_json_safe(scan_fields),
             weld=_json_safe(weld_rows),
+            path=_json_safe(path_fields),
         )
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der Characteristics: {exc}"), 500

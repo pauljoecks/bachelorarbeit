@@ -90,7 +90,7 @@ PATH_IMAGES_DIR = TEMPLATES_DIR / "path_images"
 ACQUESITION_DATA_DIR_NAME = "acquesition"
 WELDING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "welding"
 SCANNING_DATA_DIR = DEFAULT_DATA_DIR / ACQUESITION_DATA_DIR_NAME / "scanning"
-GENERATE_DATA_DIR = DEFAULT_DATA_DIR / "preparation" / "generated"
+GENERATE_DATA_DIR = DEFAULT_DATA_DIR / "preparation"
 WELDING_METADATA_COLUMNS = ["H5FILE"]
 SCANNING_METADATA_COLUMNS = ["JSONFILE"]
 SCAN_SETTINGS_COLUMNS = ["RESOLUTION", "PROFILEFREQUENCY", SCANSPEED_COLUMN, "SCANDURATION"]
@@ -189,7 +189,7 @@ def _configure_data_dirs(root: Path) -> None:
     data_dir = root.resolve()
     WELDING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "welding"
     SCANNING_DATA_DIR = data_dir / ACQUESITION_DATA_DIR_NAME / "scanning"
-    GENERATE_DATA_DIR = data_dir / "preparation" / "generated"
+    GENERATE_DATA_DIR = data_dir / "preparation"
 
 
 def _find_versuchsuebersicht_excel(root: Path) -> Path:

@@ -209,7 +209,7 @@
       <div id="analyzing-generate-artifact-status" class="analyzing-generate-artifact-status" aria-label="Generierungsstatus">
         <div class="menu-table-header">
           <p class="menu-table-count" id="analyzing-generate-artifact-status-title">Generiert</p>
-        </div>
+    </div>
 
         <div class="analyzing-generate-artifact-columns">
         {% if scan_generate_keys %}
@@ -239,7 +239,7 @@
           </ul>
         </div>
         {% endif %}
-        </div>
+    </div>
 
         <p id="analyzing-generate-artifact-legend" class="analyzing-generate-artifact-legend">
           <span><span class="analyzing-generate-artifact-indicator is-all" aria-hidden="true"></span> alle IDs</span>
@@ -255,10 +255,10 @@
           Generate
         </button>
       </div>
-    </div>
+      </div>
   </section>
-</div>
-</div>
+      </div>
+      </div>
 <script>
   (function () {
     const root = document.getElementById("analyzing-generate-options-sidebar");
@@ -268,7 +268,7 @@
 
     const SCAN_KEYS = {{ scan_generate_keys | tojson }};
     const WELD_KEYS = {{ weld_generate_keys | tojson }};
-    const STORAGE_KEY = "analyzing-generate-options-v1";
+    const STORAGE_KEY = "analyzing-generate-options-v2";
     const selectAllScan = document.getElementById("analyzing-generate-scan-select-all");
     const selectAllWeld = document.getElementById("analyzing-generate-weld-select-all");
 
@@ -715,8 +715,7 @@
     const GENERATE_OPTION_SECONDS = {
       scan: {
         cropped_scan: 0.75,
-        "64_64_scan": 0.05,
-        filtered: 0.83,
+        cropped_center: 0.75,
         x_profile: 0.08,
         y_profile: 0.05,
         characteristics: 0.06,
@@ -1136,8 +1135,8 @@
 
       if (ids.length === 0) {
         resetStatusIndicators();
-        return;
-      }
+      return;
+    }
 
       const requestId = ++refreshRequestId;
       try {
@@ -1148,16 +1147,16 @@
           },
           body: JSON.stringify({ ids }),
         });
-        const data = await response.json();
+      const data = await response.json();
         if (requestId !== refreshRequestId) {
-          return;
-        }
+        return;
+      }
         if (!response.ok) {
           resetStatusIndicators();
-          return;
-        }
+        return;
+      }
         applyStatusData(data);
-      } catch {
+                } catch {
         if (requestId === refreshRequestId) {
           resetStatusIndicators();
         }

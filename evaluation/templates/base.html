@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}evaluation{% endblock %}</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <nav class="nav-bar" aria-label="Main navigation">
+        <div class="nav-links">
+          <a
+            href="/"
+            class="nav-link{% if active_page == 'evaluate' %} active{% endif %}"
+            {% if active_page == 'evaluate' %}aria-current="page"{% endif %}
+            >Evaluate</a
+          >
+        </div>
+        <div class="nav-id" aria-hidden="true">
+          <div class="field-input-shell field-input-shell-id">
+            <input
+              type="text"
+              class="field-input field-input-id"
+              maxlength="3"
+              placeholder=" "
+              tabindex="-1"
+            />
+            <span class="field-input-hint">ID</span>
+          </div>
+        </div>
+        <div class="nav-excel">
+          <div class="nav-excel-path">
+            <input
+              type="text"
+              id="model-path"
+              class="nav-excel-input"
+              value="{{ data_path }}"
+              placeholder="Pfad zum data-Ordner"
+              spellcheck="false"
+              autocomplete="off"
+              role="combobox"
+              aria-expanded="false"
+              aria-controls="data-path-suggestions"
+              aria-autocomplete="list"
+              aria-label="Modellordner"
+            />
+            <button
+              type="button"
+              id="data-path-toggle"
+              class="nav-excel-path-toggle"
+              aria-label="Pfadvorschläge anzeigen"
+              aria-controls="data-path-suggestions"
+              aria-expanded="false"
+              tabindex="-1"
+            >
+              ▾
+            </button>
+            <ul
+              id="data-path-suggestions"
+              class="nav-excel-suggestions"
+              role="listbox"
+              hidden
+            >
+              {% for suggestion in data_path_suggestions %}
+              <li role="option" tabindex="-1" data-value="{{ suggestion }}">{{ suggestion }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          <button type="button" id="load-model" class="nav-excel-button">
+            Laden
+          </button>
+          <span id="load-status" class="load-status {{ load_status.type }}" aria-live="polite"
+            >{{ load_status.message }}</span
+          >
+        </div>
+      </nav>
+    </header>
+    <main class="page">
+      {% block content %}{% endblock %}
+    </main>
+    <script>
+      (function () {
+        const pathInput = document.getElementById("model-path");
+        const loadBtn = document.getElementById("load-model");
+        const loadStatusEl = document.getElementById("load-status");
+        const pathToggle = document.getElementById("data-path-toggle");
+        const suggestionsList = document.getElementById("data-path-suggestions");
+
+        function setLoadStatus(message, type) {
+          if (!loadStatusEl) {
+            return;
+          }
+          loadStatusEl.textContent = message;
+          loadStatusEl.className = type ? `load-status ${type}` : "load-status";
+        }
+
+        function setSuggestionsOpen(open) {
+          if (!suggestionsList || !pathInput) {
+            return;
+          }
+          suggestionsList.hidden = !open;
+          pathInput.setAttribute("aria-expanded", open ? "true" : "false");
+          pathToggle?.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+
+        function chooseSuggestion(value) {
+          if (!pathInput || !value) {
+            return;
+          }
+          pathInput.value = value;
+          setSuggestionsOpen(false);
+          pathInput.focus();
+        }
+
+        function filterSuggestions() {
+          if (!pathInput || !suggestionsList) {
+            return;
+          }
+          const query = pathInput.value.trim().toLowerCase();
+          suggestionsList.querySelectorAll('[role="option"]').forEach((option) => {
+            const value = (option.dataset.value || "").toLowerCase();
+            option.hidden = Boolean(query) && !value.includes(query);
+          });
+        }
+
+        if (pathInput && suggestionsList) {
+          pathToggle?.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const open = suggestionsList.hidden;
+            if (open) {
+              filterSuggestions();
+            }
+            setSuggestionsOpen(open);
+            if (open) {
+              pathInput.focus();
+            }
+          });
+          pathInput.addEventListener("click", () => {
+            filterSuggestions();
+            setSuggestionsOpen(true);
+          });
+          pathInput.addEventListener("input", () => {
+            filterSuggestions();
+            setSuggestionsOpen(true);
+          });
+          suggestionsList.querySelectorAll('[role="option"]').forEach((option) => {
+            option.addEventListener("mousedown", (event) => {
+              event.preventDefault();
+              chooseSuggestion(option.dataset.value);
+            });
+          });
+          document.addEventListener("click", (event) => {
+            const pathShell = pathInput.closest(".nav-excel-path");
+            if (pathShell && !pathShell.contains(event.target)) {
+              setSuggestionsOpen(false);
+            }
+          });
+        }
+
+        loadBtn?.addEventListener("click", async () => {
+          const path = pathInput?.value.trim();
+          if (!path) {
+            setLoadStatus("Bitte einen Modellordner angeben.", "error");
+            return;
+          }
+          setSuggestionsOpen(false);
+          setLoadStatus("Lädt …", "loading");
+          loadBtn.disabled = true;
+          try {
+            const response = await fetch("/api/models/load", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+              setLoadStatus(data.error || "Laden fehlgeschlagen.", "error");
+              if (data.path) {
+                pathInput.value = data.path;
+              }
+              return;
+            }
+            window.location.reload();
+          } catch (error) {
+            setLoadStatus("Verbindungsfehler. Läuft der Server noch?", "error");
+          } finally {
+            loadBtn.disabled = false;
+          }
+        });
+
+        pathInput?.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            loadBtn?.click();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

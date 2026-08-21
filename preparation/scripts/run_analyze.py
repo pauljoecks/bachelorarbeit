@@ -12,9 +12,12 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
 _ACQUESITION_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "acquesition" / "scripts"
 if str(_ACQUESITION_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_ACQUESITION_SCRIPTS_DIR))
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from run_scan import (
     AUTO_BASELINE_MIN_PROFILES,
@@ -26,6 +29,13 @@ from run_scan import (
     extract_scan_duration_s,
 )
 from run_weld import WeldConfig, _save_weld_h5
+from run_path_features import (
+    PATH_CHARACTERISTIC_FIELDS,
+    build_path_fields_for_experiment,
+    list_path_characteristic_keys,
+    normalize_path_fields,
+    serialize_path_fields,
+)
 
 PROBE_THRESHOLD_MM = 2.5
 MIRROR_ORIGIN_EDGE_EXCLUSION_MM = 1.0
@@ -39,14 +49,13 @@ WELD_START_DELAY_S = 0.020
 # Keep only this many seconds from the center of the detected weld phase.
 WELD_CROPPED_CENTER_DURATION_S = 10.0
 CROPPED_SCAN_FILENAME = "cropped_scan.json"
-SCAN_64_64_FILENAME = "64_64_scan.json"
-SCAN_64_64_GRID_SIZE = 64
+CROPPED_CENTER_FILENAME = "cropped_center.json"
+CROPPED_CENTER_MARGIN_MM = 5.0
 CROPPED_WELD_FILENAME = "cropped_weld.h5"
 POWER_H5_FILENAME = "power.h5"
 CHARACTERISTICS_FILENAME = "characteristics.json"
 GRENZEN_FILENAME = "grenzen.json"
 CHAR_GRAPHEN_FILENAME = "char_graphen.json"
-FILTERED_SCAN_FILENAME = "filtered.json"
 SCAN_SUBDIR = "scan"
 WELD_SUBDIR = "weld"
 WELD_GRAPH_SOURCE = "current"
@@ -256,19 +265,17 @@ CHAR_GRAPHEN_CHARACTERISTIC_KEYS = (
     *CHAR_GRAPHEN_DURATION_CHARACTERISTIC_KEYS,
 )
 WELD_CYCLE_CATEGORIES = ("low", "rise", "high", "fall")
-FILTER_KERNEL_SIZE = 9
 X_PROFILE_FILENAME = "X_profile.json"
 Y_PROFILE_FILENAME = "Y_profile.json"
-# Keep generate_*_profile_document helpers; profiles are built from filtered.json.
+# Keep generate_*_profile_document helpers; profiles are built from cropped_center.json.
 GENERATE_AXIS_PROFILES = True
 
 SCAN_GENERATE_KEYS = (
     "cropped_scan",
-    "filtered",
+    "cropped_center",
     "x_profile",
     "y_profile",
     "characteristics",
-    "64_64_scan",
 )
 WELD_GENERATE_KEYS = (
     "cropped",
@@ -296,14 +303,15 @@ def normalize_generate_options(raw, valid_keys: tuple[str, ...]) -> dict[str, bo
 
 def resolve_scan_generate_options(options: dict[str, bool]) -> dict[str, bool]:
     resolved = dict(options)
-    if resolved.get("64_64_scan"):
+    if (
+        resolved.get("x_profile")
+        or resolved.get("y_profile")
+        or resolved.get("characteristics")
+    ):
+        resolved["cropped_center"] = True
+    if resolved.get("cropped_center"):
         resolved["cropped_scan"] = True
-    if resolved.get("filtered") or resolved.get("x_profile") or resolved.get("y_profile"):
-        resolved["cropped_scan"] = True
-    if resolved.get("x_profile") or resolved.get("y_profile"):
-        resolved["filtered"] = True
     if resolved.get("characteristics"):
-        resolved["filtered"] = True
         resolved["x_profile"] = True
         resolved["y_profile"] = True
     return resolved
@@ -332,23 +340,14 @@ def collect_regenerate_deletion_keys(
     for index, key in enumerate(keys):
         if options.get(key):
             deletion_keys.update(keys[index:])
-    # 64×64 depends only on cropped_scan — later scan steps do not invalidate it.
-    if (
-        "64_64_scan" in deletion_keys
-        and not options.get("cropped_scan")
-        and not options.get("64_64_scan")
-    ):
-        deletion_keys.discard("64_64_scan")
     return frozenset(deletion_keys)
 
 
 def _artifact_relative_paths_for_generate_key(key: str) -> tuple[str, ...]:
     if key == "cropped_scan":
         return (f"{SCAN_SUBDIR}/{CROPPED_SCAN_FILENAME}",)
-    if key == "64_64_scan":
-        return (f"{SCAN_SUBDIR}/{SCAN_64_64_FILENAME}",)
-    if key == "filtered":
-        return (f"{SCAN_SUBDIR}/{FILTERED_SCAN_FILENAME}",)
+    if key == "cropped_center":
+        return (f"{SCAN_SUBDIR}/{CROPPED_CENTER_FILENAME}",)
     if key == "x_profile":
         return (f"{SCAN_SUBDIR}/{X_PROFILE_FILENAME}",)
     if key == "y_profile":
@@ -383,10 +382,11 @@ def clear_characteristics_sections(
     try:
         existing_doc = load_characteristics(char_path)
     except ValueError:
-        existing_doc = {"scan": {}, "weld": []}
+        existing_doc = {"scan": {}, "weld": [], "path": {}}
 
     scan_fields = {} if clear_scan else dict(existing_doc.get("scan") or {})
     weld_rows = [] if clear_weld else list(existing_doc.get("weld") or [])
+    path_fields = dict(existing_doc.get("path") or {})
 
     cleared: list[str] = []
     if clear_scan:
@@ -394,7 +394,7 @@ def clear_characteristics_sections(
     if clear_weld:
         cleared.append(f"{CHARACTERISTICS_FILENAME}#weld")
 
-    if not scan_fields and not weld_rows:
+    if not scan_fields and not weld_rows and not path_fields:
         char_path.unlink()
         return cleared
 
@@ -402,6 +402,7 @@ def clear_characteristics_sections(
         char_path,
         scan_fields=scan_fields,
         weld_rows=weld_rows,
+        path_fields=path_fields,
     )
     return cleared
 
@@ -471,6 +472,11 @@ def delete_regenerate_artifacts(
             seen_paths.add(artifact_path)
             artifact_path.unlink()
             deleted.append(relative_path.replace("\\", "/"))
+
+    leftover_filtered = (output_folder / SCAN_SUBDIR / "filtered.json").resolve()
+    if leftover_filtered.is_file() and leftover_filtered not in seen_paths:
+        leftover_filtered.unlink()
+        deleted.append(f"{SCAN_SUBDIR}/filtered.json")
 
     deleted.extend(
         clear_characteristics_sections(
@@ -808,107 +814,6 @@ def generate_analyzing_document(
     }
 
 
-def _average_filter_2d(
-    values: np.ndarray,
-    valid_mask: np.ndarray,
-    *,
-    kernel_size: int = FILTER_KERNEL_SIZE,
-) -> np.ndarray:
-    """Mean-filter valid points with a square neighborhood; invalid stays 0."""
-    if kernel_size < 1 or kernel_size % 2 == 0:
-        raise ValueError("kernel_size muss ungerade und >= 1 sein.")
-
-    radius = kernel_size // 2
-    padded_values = np.pad(values.astype(float, copy=False), radius, mode="constant", constant_values=0.0)
-    padded_valid = np.pad(
-        valid_mask.astype(float, copy=False),
-        radius,
-        mode="constant",
-        constant_values=0.0,
-    )
-
-    value_windows = np.lib.stride_tricks.sliding_window_view(
-        padded_values,
-        (kernel_size, kernel_size),
-    )
-    valid_windows = np.lib.stride_tricks.sliding_window_view(
-        padded_valid,
-        (kernel_size, kernel_size),
-    )
-
-    neighbor_sum = (value_windows * valid_windows).sum(axis=(-1, -2))
-    neighbor_count = valid_windows.sum(axis=(-1, -2))
-    filtered = np.zeros_like(values, dtype=float)
-    np.divide(neighbor_sum, neighbor_count, out=filtered, where=neighbor_count > 0)
-    filtered[~valid_mask] = 0.0
-    return filtered
-
-
-def generate_filtered_scan_document(
-    cropped_scan_document: dict,
-    *,
-    kernel_size: int = FILTER_KERNEL_SIZE,
-) -> dict:
-    profiles = cropped_scan_document.get("profiles") or []
-    if not profiles:
-        raise ValueError("Keine Profile in cropped_scan für den Noise-Filter gefunden.")
-
-    resolution = len(profiles[0].get("x_mm") or [])
-    if resolution <= 0:
-        raise ValueError("Keine x-Werte für den Noise-Filter gefunden.")
-
-    z_stack = np.stack([np.asarray(profile["z_mm"], dtype=float) for profile in profiles])
-    intensity_stack = np.stack(
-        [np.asarray(profile["intensities"], dtype=float) for profile in profiles]
-    )
-    valid_mask = z_stack > 0
-
-    filtered_z = _average_filter_2d(z_stack, valid_mask, kernel_size=kernel_size)
-    filtered_intensities = _average_filter_2d(
-        intensity_stack,
-        valid_mask,
-        kernel_size=kernel_size,
-    )
-
-    filtered_profiles = []
-    for index, profile in enumerate(profiles):
-        filtered_profiles.append(
-            {
-                **profile,
-                "profile_index": index,
-                "z_mm": np.round(filtered_z[index], 6).astype(float).tolist(),
-                "intensities": np.round(filtered_intensities[index]).astype(int).tolist(),
-            }
-        )
-
-    return {
-        **cropped_scan_document,
-        "source_json_file": CROPPED_SCAN_FILENAME,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "filter": {
-            "type": "average_2d",
-            "kernel_size": int(kernel_size),
-        },
-        "profile_count": len(filtered_profiles),
-        "profiles": filtered_profiles,
-    }
-
-
-def _tight_valid_bbox(valid_mask: np.ndarray) -> tuple[int, int, int, int]:
-    rows = np.any(valid_mask, axis=1)
-    cols = np.any(valid_mask, axis=0)
-    if not rows.any() or not cols.any():
-        raise ValueError("Keine gültigen Messpunkte für 64×64-Scan gefunden.")
-    row_indices = np.flatnonzero(rows)
-    col_indices = np.flatnonzero(cols)
-    return (
-        int(row_indices[0]),
-        int(row_indices[-1]),
-        int(col_indices[0]),
-        int(col_indices[-1]),
-    )
-
-
 def _profile_y_mm_values(profiles: list[dict]) -> np.ndarray:
     y_values = []
     for profile in profiles:
@@ -917,102 +822,6 @@ def _profile_y_mm_values(profiles: list[dict]) -> np.ndarray:
             raise ValueError("y_mm fehlt in cropped_scan-Profil.")
         y_values.append(float(y_mm))
     return np.asarray(y_values, dtype=float)
-
-
-def _mean_pool_valid_2d(
-    values: np.ndarray,
-    valid_mask: np.ndarray,
-    out_rows: int,
-    out_cols: int,
-) -> np.ndarray:
-    """Downsample by mean of all valid source pixels in each output cell."""
-    in_rows, in_cols = values.shape
-    if in_rows < 1 or in_cols < 1:
-        raise ValueError("Leeres Eingaberaster für 64×64-Resampling.")
-
-    out = np.zeros((out_rows, out_cols), dtype=float)
-    for oi in range(out_rows):
-        r0 = (oi * in_rows) // out_rows
-        r1 = ((oi + 1) * in_rows) // out_rows
-        if r1 <= r0:
-            r1 = min(r0 + 1, in_rows)
-
-        for oj in range(out_cols):
-            c0 = (oj * in_cols) // out_cols
-            c1 = ((oj + 1) * in_cols) // out_cols
-            if c1 <= c0:
-                c1 = min(c0 + 1, in_cols)
-
-            block_values = values[r0:r1, c0:c1]
-            block_mask = valid_mask[r0:r1, c0:c1]
-            keep = block_mask & np.isfinite(block_values) & (block_values > 0)
-            if np.any(keep):
-                out[oi, oj] = float(np.mean(block_values[keep]))
-
-    return out
-
-
-def generate_64_64_scan_document(
-    cropped_scan_document: dict,
-    *,
-    grid_size: int = SCAN_64_64_GRID_SIZE,
-) -> dict:
-    profiles = cropped_scan_document.get("profiles") or []
-    if not profiles:
-        raise ValueError("Keine Profile in cropped_scan für 64×64-Scan gefunden.")
-
-    z_stack, valid_mask = _stack_profile_z_and_valid_mask(profiles)
-    row_start, row_end, col_start, col_end = _tight_valid_bbox(valid_mask)
-
-    z_crop = z_stack[row_start : row_end + 1, col_start : col_end + 1]
-    valid_crop = valid_mask[row_start : row_end + 1, col_start : col_end + 1]
-    z_grid = _mean_pool_valid_2d(z_crop, valid_crop, grid_size, grid_size)
-
-    y_mm_src = _profile_y_mm_values(profiles)
-    x_mm_src = np.asarray(profiles[0]["x_mm"], dtype=float)
-    if x_mm_src.size <= col_end:
-        raise ValueError("x_mm-Auflösung passt nicht zum gültigen Probenbereich.")
-
-    y_low = float(y_mm_src[row_start])
-    y_high = float(y_mm_src[row_end])
-    y_min = min(y_low, y_high)
-    y_max = max(y_low, y_high)
-    y_mm = np.linspace(y_min, y_max, grid_size)
-
-    x_at_start = float(x_mm_src[col_start])
-    x_at_end = float(x_mm_src[col_end])
-    x_min = min(x_at_start, x_at_end)
-    x_max = max(x_at_start, x_at_end)
-    x_reversed = x_at_start > x_at_end
-    if x_reversed:
-        x_mm = np.linspace(x_max, x_min, grid_size)
-    else:
-        x_mm = np.linspace(x_min, x_max, grid_size)
-
-    values = np.round(z_grid, 6).reshape(-1).astype(float).tolist()
-
-    return {
-        "experiment_id": cropped_scan_document.get("experiment_id"),
-        "source_json_file": CROPPED_SCAN_FILENAME,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "grid_size": int(grid_size),
-        "profile_count": int(grid_size),
-        "resolution": int(grid_size),
-        "x_min": round(x_min, 6),
-        "x_max": round(x_max, 6),
-        "x_reversed": bool(x_reversed),
-        "y_min": round(y_min, 6),
-        "y_max": round(y_max, 6),
-        "y_mm": np.round(y_mm, 6).astype(float).tolist(),
-        "x_mm": np.round(x_mm, 6).astype(float).tolist(),
-        "values": values,
-        "crop": {
-            "profile_start": row_start,
-            "profile_end": row_end,
-            "column_start": col_start,
-            "column_end": col_end,
-        },
-    }
 
 
 def _nanmedian_axis(values: np.ndarray, axis: int) -> np.ndarray:
@@ -1036,6 +845,104 @@ def _stack_profile_z_and_valid_mask(
     return z_stack, valid_mask
 
 
+def _collapse_profile_fit_points(
+    t_mm: np.ndarray,
+    z_mm: np.ndarray,
+    *,
+    min_points: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Sort by t, drop NaNs, and average z at duplicate t values."""
+    t = np.asarray(t_mm, dtype=float)
+    z = np.asarray(z_mm, dtype=float)
+    keep = np.isfinite(t) & np.isfinite(z)
+    t = t[keep]
+    z = z[keep]
+    if t.size < min_points:
+        return None
+
+    order = np.argsort(t)
+    t = t[order]
+    z = z[order]
+    unique_t, inverse = np.unique(t, return_inverse=True)
+    if unique_t.size < min_points:
+        return None
+    if unique_t.size != t.size:
+        sums = np.bincount(inverse, weights=z)
+        counts = np.bincount(inverse)
+        t = unique_t
+        z = sums / np.maximum(counts, 1)
+    if float(t[-1]) - float(t[0]) <= 0:
+        return None
+    return t, z
+
+
+def _axis_sample_spacings(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    count = values.size
+    spacing = np.ones(count, dtype=float)
+    if count < 2:
+        return spacing
+    delta = np.abs(np.diff(values))
+    spacing[0] = delta[0]
+    spacing[-1] = delta[-1]
+    if count > 2:
+        spacing[1:-1] = 0.5 * (delta[:-1] + delta[1:])
+    return np.maximum(spacing, 1e-12)
+
+
+def _mean_abs_curvature_from_samples(t: np.ndarray, kappa: np.ndarray) -> float | None:
+    """κ_abs = (1/L) ∫ |κ| dt with L from the finite sample span."""
+    t_arr = np.asarray(t, dtype=float)
+    kappa_arr = np.asarray(kappa, dtype=float)
+    finite = np.isfinite(t_arr) & np.isfinite(kappa_arr)
+    if int(np.count_nonzero(finite)) < 2:
+        return None
+    t_f = t_arr[finite]
+    k_f = kappa_arr[finite]
+    order = np.argsort(t_f)
+    t_f = t_f[order]
+    k_f = k_f[order]
+    length = float(t_f[-1] - t_f[0])
+    if length <= 0:
+        return None
+    integrate = getattr(np, "trapezoid", None) or np.trapz
+    integral = float(integrate(np.abs(k_f), t_f))
+    if integral < 0 or not np.isfinite(integral):
+        return None
+    return float(integral / length)
+
+
+def _weighted_mean_abs(values: np.ndarray, weights: np.ndarray) -> float | None:
+    finite = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+    if not np.any(finite):
+        return None
+    selected = np.asarray(values[finite], dtype=float)
+    area = np.asarray(weights[finite], dtype=float)
+    denom = float(np.sum(area))
+    numer = float(np.sum(area * np.abs(selected)))
+    if denom <= 0 or numer < 0 or not np.isfinite(numer) or not np.isfinite(denom):
+        return None
+    return float(numer / denom)
+
+
+HYPERBOLA_POLE_OFFSET_FRACTIONS = np.asarray(
+    [0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0],
+    dtype=float,
+)
+HYPERBOLA_POLE_MIN_OFFSET_MM = 20.0
+SURFACE_HYPERBOLA_FIT_MAX_POINTS = 12000
+CURVATURE_ABS_SAMPLE_COUNT = 401
+
+
+def _hyperbola_pole_candidates(t_min: float, t_max: float) -> np.ndarray:
+    span = float(t_max) - float(t_min)
+    if span <= 0:
+        return np.asarray([], dtype=float)
+    offsets = np.maximum(span * HYPERBOLA_POLE_OFFSET_FRACTIONS, HYPERBOLA_POLE_MIN_OFFSET_MM)
+    offsets = np.unique(offsets)
+    return np.concatenate([t_min - offsets, t_max + offsets])
+
+
 def fit_profile_hyperbola(
     t_mm: np.ndarray,
     z_mm: np.ndarray,
@@ -1046,29 +953,13 @@ def fit_profile_hyperbola(
     Fit a rectangular hyperbola with linear trend:
         z(t) = a + b * t + c / (t - d)
 
-    The pole ``d`` is searched outside the measured interval so the curve stays
-    smooth over the profile. Returns None if the fit is not possible.
+    The pole ``d`` is searched at least 20 mm outside the measured interval so
+    the curve stays smooth over the profile. Returns None if the fit is not possible.
     """
-    t = np.asarray(t_mm, dtype=float)
-    z = np.asarray(z_mm, dtype=float)
-    keep = np.isfinite(t) & np.isfinite(z)
-    t = t[keep]
-    z = z[keep]
-    if t.size < 4:
+    prepared = _collapse_profile_fit_points(t_mm, z_mm, min_points=4)
+    if prepared is None:
         return None
-
-    order = np.argsort(t)
-    t = t[order]
-    z = z[order]
-    # Collapse duplicate t values by averaging z (stable design matrix).
-    unique_t, inverse = np.unique(t, return_inverse=True)
-    if unique_t.size < 4:
-        return None
-    if unique_t.size != t.size:
-        sums = np.bincount(inverse, weights=z)
-        counts = np.bincount(inverse)
-        t = unique_t
-        z = sums / np.maximum(counts, 1)
+    t, z = prepared
 
     t_min = float(t[0])
     t_max = float(t[-1])
@@ -1076,12 +967,7 @@ def fit_profile_hyperbola(
     if span <= 0:
         return None
 
-    # Candidate poles outside [t_min, t_max], both sides, several distances.
-    offsets = span * np.asarray(
-        [0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0],
-        dtype=float,
-    )
-    candidate_d = np.concatenate([t_min - offsets, t_max + offsets])
+    candidate_d = _hyperbola_pole_candidates(t_min, t_max)
 
     best: dict | None = None
     z_mean = float(np.mean(z))
@@ -1161,65 +1047,196 @@ def compute_hyperbola_curvature(
     t_max: float,
 ) -> dict | None:
     """
-    Signed curvature κ = z'' / (1 + (z')^2)^(3/2) for z = a + b*t + c/(t - d).
+    Mean absolute curvature along the fitted interval:
 
+        κ_abs = (1/L) ∫ |κ(t)| dt,  L = t_max - t_min
+
+    with signed κ = z'' / (1 + (z')^2)^{3/2} for z = a + b*t + c/(t - d).
     Coordinates are in mm; returned curvature is converted to 1/m (κ_m = κ_mm * 1000).
-
-    Prefer κ at a z-extremum inside [t_min, t_max] (where z'=0).
-    Otherwise use the location of maximum |κ| in the interval.
     """
     if not np.isfinite([a, b, c, d, t_min, t_max]).all() or t_max <= t_min:
         return None
 
-    def derivatives(t: float) -> tuple[float, float]:
-        u = t - d
-        if abs(u) < 1e-12:
-            return float("nan"), float("nan")
-        zp = b - c / (u * u)
-        zpp = 2.0 * c / (u * u * u)
-        return float(zp), float(zpp)
+    t = np.linspace(t_min, t_max, CURVATURE_ABS_SAMPLE_COUNT)
+    u = t - d
+    u2 = u * u
+    zp = b - c / u2
+    zpp = 2.0 * c / (u2 * u)
+    kappa = zpp / ((1.0 + zp * zp) ** 1.5)
+    kappa[np.abs(u) < 1e-9] = np.nan
+    mean_abs = _mean_abs_curvature_from_samples(t, kappa)
+    if mean_abs is None:
+        return None
+    return {
+        "curvature_1_per_m": round(float(mean_abs) * 1000.0, 9),
+        "curvature_source": "mean_abs",
+    }
 
-    def signed_kappa(t: float) -> float:
-        zp, zpp = derivatives(t)
-        if not np.isfinite(zp) or not np.isfinite(zpp):
-            return float("nan")
-        return float(zpp / ((1.0 + zp * zp) ** 1.5))
 
-    candidate_t: list[float] = []
-    if abs(b) > 1e-15:
-        ratio = c / b
-        if ratio > 0:
-            root = float(np.sqrt(ratio))
-            for t_star in (d + root, d - root):
-                if t_min <= t_star <= t_max:
-                    zp, _zpp = derivatives(t_star)
-                    if np.isfinite(zp) and abs(zp) < 1e-6 * max(1.0, abs(b)):
-                        candidate_t.append(t_star)
+def fit_profile_parabola(
+    t_mm: np.ndarray,
+    z_mm: np.ndarray,
+    *,
+    sample_count: int = 200,
+) -> dict | None:
+    """
+    Fit a quadratic parabola:
+        z(t) = a + b * t + c * t²
 
-    if candidate_t:
-        scored = [(abs(signed_kappa(t)), t) for t in candidate_t]
-        scored = [(mag, t) for mag, t in scored if np.isfinite(mag)]
-        if scored:
-            _mag, t_sel = max(scored, key=lambda item: item[0])
-            kappa = signed_kappa(t_sel)
-            if np.isfinite(kappa):
-                return {
-                    "curvature_1_per_m": round(float(kappa) * 1000.0, 9),
-                    "curvature_t_mm": round(float(t_sel), 6),
-                    "curvature_source": "extremum",
-                }
+    Returns None if the fit is not possible.
+    """
+    prepared = _collapse_profile_fit_points(t_mm, z_mm, min_points=3)
+    if prepared is None:
+        return None
+    t, z = prepared
 
-    sample_t = np.linspace(t_min, t_max, 401)
-    kappas = np.asarray([signed_kappa(float(t)) for t in sample_t], dtype=float)
-    finite = np.isfinite(kappas)
-    if not np.any(finite):
+    t_min = float(t[0])
+    t_max = float(t[-1])
+    z_mean = float(np.mean(z))
+    ss_tot = float(np.sum((z - z_mean) ** 2))
+    if ss_tot <= 0:
         return None
 
-    idx = int(np.nanargmax(np.abs(kappas)))
+    design = np.column_stack((np.ones(t.size, dtype=float), t, t * t))
+    try:
+        coeffs, _, rank, _ = np.linalg.lstsq(design, z, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    if rank < 3:
+        return None
+
+    a, b, c = (float(coeffs[0]), float(coeffs[1]), float(coeffs[2]))
+    z_hat = a + b * t + c * t * t
+    resid = z - z_hat
+    ss_res = float(np.sum(resid ** 2))
+    rmse = float(np.sqrt(ss_res / t.size))
+    r2 = float(1.0 - (ss_res / ss_tot))
+    if not np.isfinite(r2) or not np.isfinite(rmse):
+        return None
+
+    eval_count = max(int(sample_count), 2)
+    t_fit = np.linspace(t_min, t_max, eval_count)
+    z_fit = a + b * t_fit + c * t_fit * t_fit
+    result = {
+        "a": round(a, 9),
+        "b": round(b, 9),
+        "c": round(c, 9),
+        "rmse": round(rmse, 6),
+        "r2": round(r2, 6),
+        "formula": "z = a + b*t + c*t^2",
+        "t_mm": np.round(t_fit, 6).astype(float).tolist(),
+        "z_mm": np.round(z_fit, 6).astype(float).tolist(),
+        "point_count": int(eval_count),
+    }
+    curvature = compute_parabola_curvature(a, b, c, t_min, t_max)
+    if curvature is not None:
+        result.update(curvature)
+    return result
+
+
+def compute_parabola_curvature(
+    a: float,
+    b: float,
+    c: float,
+    t_min: float,
+    t_max: float,
+) -> dict | None:
+    """
+    Mean absolute curvature along the fitted interval:
+
+        κ_abs = (1/L) ∫ |κ(t)| dt,  L = t_max - t_min
+
+    with signed κ = z'' / (1 + (z')^2)^{3/2} for z = a + b*t + c*t².
+    Coordinates are in mm; returned curvature is converted to 1/m (κ_m = κ_mm * 1000).
+    """
+    if not np.isfinite([a, b, c, t_min, t_max]).all() or t_max <= t_min:
+        return None
+
+    t = np.linspace(t_min, t_max, CURVATURE_ABS_SAMPLE_COUNT)
+    zp = b + 2.0 * c * t
+    zpp = 2.0 * c
+    kappa = zpp / ((1.0 + zp * zp) ** 1.5)
+    mean_abs = _mean_abs_curvature_from_samples(t, kappa)
+    if mean_abs is None:
+        return None
     return {
-        "curvature_1_per_m": round(float(kappas[idx]) * 1000.0, 9),
-        "curvature_t_mm": round(float(sample_t[idx]), 6),
-        "curvature_source": "max_abs",
+        "curvature_1_per_m": round(float(mean_abs) * 1000.0, 9),
+        "curvature_source": "mean_abs",
+    }
+
+
+def _attach_axis_profile_fits(document: dict, t_values: np.ndarray, z_values: np.ndarray) -> dict:
+    hyperbola = fit_profile_hyperbola(t_values, z_values)
+    parabola = fit_profile_parabola(t_values, z_values)
+    if hyperbola is not None:
+        document["hyperbola"] = hyperbola
+    if parabola is not None:
+        document["parabola"] = parabola
+    return document
+
+
+def generate_cropped_center_document(
+    cropped_scan_document: dict,
+    *,
+    margin_mm: float = CROPPED_CENTER_MARGIN_MM,
+) -> dict:
+    profiles = cropped_scan_document.get("profiles") or []
+    if not profiles:
+        raise ValueError("Keine Profile in cropped_scan für cropped_center gefunden.")
+
+    x_mm = np.asarray(profiles[0].get("x_mm") or [], dtype=float)
+    if x_mm.size == 0:
+        raise ValueError("Keine x-Werte für cropped_center gefunden.")
+
+    y_mm = _profile_y_mm_values(profiles)
+    z_stack, valid_mask = _stack_profile_z_and_valid_mask(profiles)
+    xx, yy = np.meshgrid(x_mm, y_mm)
+    keep = valid_mask & np.isfinite(xx) & np.isfinite(yy) & np.isfinite(z_stack)
+    if not np.any(keep):
+        raise ValueError("Keine gültigen Punkte für cropped_center gefunden.")
+
+    x_min = float(np.min(xx[keep]))
+    x_max = float(np.max(xx[keep]))
+    y_min = float(np.min(yy[keep]))
+    y_max = float(np.max(yy[keep]))
+    inner_x_min = x_min + float(margin_mm)
+    inner_x_max = x_max - float(margin_mm)
+    inner_y_min = y_min + float(margin_mm)
+    inner_y_max = y_max - float(margin_mm)
+    if inner_x_max <= inner_x_min or inner_y_max <= inner_y_min:
+        raise ValueError(
+            f"cropped_center: {margin_mm:g} mm Randabzug lässt keine Fläche übrig "
+            f"(gültig {x_max - x_min:.2f} mm × {y_max - y_min:.2f} mm)."
+        )
+
+    center_mask = (
+        keep
+        & (xx >= inner_x_min)
+        & (xx <= inner_x_max)
+        & (yy >= inner_y_min)
+        & (yy <= inner_y_max)
+    )
+    if not np.any(center_mask):
+        raise ValueError("cropped_center: nach dem Randabzug bleiben keine gültigen Punkte.")
+
+    center_profiles = []
+    for index, profile in enumerate(profiles):
+        filtered = _apply_probe_mask_to_profile(profile, center_mask[index])
+        center_profiles.append({**filtered, "profile_index": index})
+
+    return {
+        **cropped_scan_document,
+        "source_json_file": CROPPED_SCAN_FILENAME,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "center_crop": {
+            "margin_mm": float(margin_mm),
+            "valid_x_min_mm": round(x_min, 6),
+            "valid_x_max_mm": round(x_max, 6),
+            "valid_y_min_mm": round(y_min, 6),
+            "valid_y_max_mm": round(y_max, 6),
+        },
+        "profile_count": len(center_profiles),
+        "profiles": center_profiles,
     }
 
 
@@ -1245,19 +1262,16 @@ def generate_x_profile_document(cropped_scan_document: dict) -> dict:
 
     x_values = np.round(x_mm[keep], 6).astype(float)
     z_values = np.round(column_medians[keep], 6).astype(float)
-    hyperbola = fit_profile_hyperbola(x_values, z_values)
 
     document = {
         "experiment_id": cropped_scan_document.get("experiment_id"),
-        "source_json_file": FILTERED_SCAN_FILENAME,
+        "source_json_file": CROPPED_CENTER_FILENAME,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "point_count": int(x_values.size),
         "x_mm": x_values.tolist(),
         "z_mm": z_values.tolist(),
     }
-    if hyperbola is not None:
-        document["hyperbola"] = hyperbola
-    return document
+    return _attach_axis_profile_fits(document, x_values, z_values)
 
 
 def generate_y_profile_document(cropped_scan_document: dict) -> dict:
@@ -1286,32 +1300,33 @@ def generate_y_profile_document(cropped_scan_document: dict) -> dict:
 
     y_values = np.round(selected_y[keep], 6).astype(float)
     z_values = np.round(row_medians[keep], 6).astype(float)
-    hyperbola = fit_profile_hyperbola(y_values, z_values)
 
     document = {
         "experiment_id": cropped_scan_document.get("experiment_id"),
-        "source_json_file": FILTERED_SCAN_FILENAME,
+        "source_json_file": CROPPED_CENTER_FILENAME,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "point_count": int(y_values.size),
         "y_mm": y_values.tolist(),
         "z_mm": z_values.tolist(),
     }
-    if hyperbola is not None:
-        document["hyperbola"] = hyperbola
-    return document
+    return _attach_axis_profile_fits(document, y_values, z_values)
 
 
-def compute_filtered_surface_curvature(filtered_scan_document: dict) -> dict | None:
+def compute_surface_curvature(scan_document: dict) -> dict | None:
     """
-    Fit a quadratic surface on filtered z(x, y) and return mean curvature H.
+    Fit a separable hyperbolic surface on cropped_center z(x, y) and return
+    mean absolute mean curvature H:
 
-        z(x, y) = a + b x + c y + d x² + e x y + f y²
+        H_abs = (1/A) ∬ |H(x, y)| dx dy
 
+        z(x, y) = a + b x + c y + d / (x - p) + e / (y - q)
+
+    Poles ``p`` and ``q`` are searched at least 20 mm outside the measured
+    x- and y-intervals.
     Coordinates are in mm; returned curvature is converted to 1/m (κ_m = κ_mm * 1000).
-    Prefer H at a gradient-zero vertex inside the measured domain.
-    Otherwise evaluate H at the centroid of the valid points.
+    Gaussian curvature K is likewise an area-weighted mean of |K| over the valid points.
     """
-    profiles = filtered_scan_document.get("profiles") or []
+    profiles = scan_document.get("profiles") or []
     if not profiles:
         return None
 
@@ -1340,96 +1355,184 @@ def compute_filtered_surface_curvature(filtered_scan_document: dict) -> dict | N
         & np.isfinite(yy)
         & (z_stack > 0)
     )
-    if int(np.count_nonzero(keep)) < 6:
+    if int(np.count_nonzero(keep)) < 5:
         return None
 
     x = xx[keep]
     y = yy[keep]
     z = z_stack[keep]
 
-    x_mean = float(np.mean(x))
-    y_mean = float(np.mean(y))
-    z_mean = float(np.mean(z))
-    sx = float(np.std(x))
-    sy = float(np.std(y))
-    if sx <= 1e-12 or sy <= 1e-12:
-        return None
-
-    xn = (x - x_mean) / sx
-    yn = (y - y_mean) / sy
-    zn = z - z_mean
-    design = np.column_stack((np.ones(xn.size), xn, yn, xn * xn, xn * yn, yn * yn))
-    try:
-        coeffs, _residuals, rank, _sv = np.linalg.lstsq(design, zn, rcond=None)
-    except np.linalg.LinAlgError:
-        return None
-    if rank < 6:
-        return None
-
-    _a, b, c, d, e, f = (float(value) for value in coeffs)
-
-    z_hat = design @ coeffs
-    resid = zn - z_hat
-    ss_res = float(np.sum(resid ** 2))
-    ss_tot = float(np.sum((zn - float(np.mean(zn))) ** 2))
-    r2 = float(1.0 - (ss_res / ss_tot)) if ss_tot > 0 else float("nan")
-    rmse = float(np.sqrt(ss_res / zn.size))
-
-    zxx = 2.0 * d / (sx * sx)
-    zyy = 2.0 * f / (sy * sy)
-    zxy = e / (sx * sy)
-
-    def signed_h(xn_val: np.ndarray, yn_val: np.ndarray) -> np.ndarray:
-        zx = (b + 2.0 * d * xn_val + e * yn_val) / sx
-        zy = (c + e * xn_val + 2.0 * f * yn_val) / sy
-        numer = (1.0 + zy * zy) * zxx - 2.0 * zx * zy * zxy + (1.0 + zx * zx) * zyy
-        denom = 2.0 * np.power(1.0 + zx * zx + zy * zy, 1.5)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return numer / denom
-
     x_min = float(np.min(x))
     x_max = float(np.max(x))
     y_min = float(np.min(y))
     y_max = float(np.max(y))
-
-    def in_domain(x_val: float, y_val: float) -> bool:
-        return x_min <= x_val <= x_max and y_min <= y_val <= y_max
-
-    source = "centroid"
-    x_sel = x_mean
-    y_sel = y_mean
-    kappa = float(signed_h(np.asarray(0.0), np.asarray(0.0)))
-    hess = np.array([[2.0 * d, e], [e, 2.0 * f]], dtype=float)
-    try:
-        xn_star, yn_star = np.linalg.solve(hess, np.array([-b, -c], dtype=float))
-        x_star = float(xn_star * sx + x_mean)
-        y_star = float(yn_star * sy + y_mean)
-        if np.isfinite([x_star, y_star]).all() and in_domain(x_star, y_star):
-            h_star = float(signed_h(np.asarray(xn_star), np.asarray(yn_star)))
-            if np.isfinite(h_star):
-                source = "extremum"
-                x_sel = x_star
-                y_sel = y_star
-                kappa = h_star
-    except np.linalg.LinAlgError:
-        pass
-
-    if not np.isfinite(kappa):
+    if x_max <= x_min or y_max <= y_min:
         return None
 
+    z_mean = float(np.mean(z))
+    ss_tot = float(np.sum((z - z_mean) ** 2))
+    if ss_tot <= 0:
+        return None
+
+    candidate_p = _hyperbola_pole_candidates(x_min, x_max)
+    candidate_q = _hyperbola_pole_candidates(y_min, y_max)
+    if candidate_p.size == 0 or candidate_q.size == 0:
+        return None
+
+    n_points = int(x.size)
+    if n_points > SURFACE_HYPERBOLA_FIT_MAX_POINTS:
+        sample_idx = np.linspace(0, n_points - 1, SURFACE_HYPERBOLA_FIT_MAX_POINTS).astype(int)
+        x_search = x[sample_idx]
+        y_search = y[sample_idx]
+        z_search = z[sample_idx]
+    else:
+        x_search = x
+        y_search = y
+        z_search = z
+
+    best: dict | None = None
+    for pole_p in candidate_p:
+        for pole_q in candidate_q:
+            fitted = _lstsq_surface_hyperbola(x_search, y_search, z_search, pole_p, pole_q)
+            if fitted is None:
+                continue
+            _coeffs, ss_res = fitted
+            if best is None or ss_res < best["ss_res"]:
+                best = {"p": float(pole_p), "q": float(pole_q), "ss_res": ss_res}
+
+    if best is None:
+        return None
+
+    fitted = _lstsq_surface_hyperbola(x, y, z, best["p"], best["q"])
+    if fitted is None:
+        return None
+    coeffs, ss_res = fitted
+    a, b, c, d, e = (float(value) for value in coeffs)
+    rmse = float(np.sqrt(ss_res / z.size))
+    r2 = float(1.0 - (ss_res / ss_tot))
+    if not np.isfinite(r2) or not np.isfinite(rmse):
+        return None
+
+    dx = _axis_sample_spacings(x_mm)
+    dy = _axis_sample_spacings(y_mm)
+    area = dy[:, None] * dx[None, :]
+    weights = area[keep]
+    mean_h = _surface_hyperbola_mean_curvature_vec(
+        x, y, b, c, d, e, best["p"], best["q"],
+    )
+    kappa = _weighted_mean_abs(mean_h, weights)
+    if kappa is None or not np.isfinite(kappa):
+        return None
+
+    gaussian = _weighted_mean_abs(
+        _surface_hyperbola_gaussian_curvature_vec(x, y, b, c, d, e, best["p"], best["q"]),
+        weights,
+    )
     result = {
         "curvature_1_per_m": round(float(kappa) * 1000.0, 9),
-        "curvature_x_mm": round(float(x_sel), 6),
-        "curvature_y_mm": round(float(y_sel), 6),
-        "curvature_source": source,
+        "curvature_source": "mean_abs",
         "point_count": int(z.size),
-        "formula": "z = a + b*x + c*y + d*x^2 + e*x*y + f*y^2",
+        "r2": round(r2, 6),
+        "rmse": round(rmse, 6),
+        "a": round(a, 9),
+        "b": round(b, 9),
+        "c": round(c, 9),
+        "d": round(d, 9),
+        "e": round(e, 9),
+        "p": round(best["p"], 9),
+        "q": round(best["q"], 9),
+        "formula": "z = a + b*x + c*y + d/(x - p) + e/(y - q)",
     }
-    if np.isfinite(r2):
-        result["r2"] = round(r2, 6)
-    if np.isfinite(rmse):
-        result["rmse"] = round(rmse, 6)
+    if gaussian is not None and np.isfinite(gaussian):
+        result["gaussian_1_per_m2"] = round(float(gaussian) * 1_000_000.0, 9)
     return result
+
+
+def _lstsq_surface_hyperbola(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    pole_p: float,
+    pole_q: float,
+) -> tuple[np.ndarray, float] | None:
+    u = x - pole_p
+    v = y - pole_q
+    if np.any(np.abs(u) < 1e-9) or np.any(np.abs(v) < 1e-9):
+        return None
+    design = np.column_stack((np.ones(x.size, dtype=float), x, y, 1.0 / u, 1.0 / v))
+    try:
+        coeffs, _, rank, _ = np.linalg.lstsq(design, z, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    if rank < 5:
+        return None
+    resid = z - design @ coeffs
+    ss_res = float(np.sum(resid ** 2))
+    if not np.isfinite(ss_res):
+        return None
+    return coeffs, ss_res
+
+
+def _surface_hyperbola_derivatives_vec(
+    x: np.ndarray,
+    y: np.ndarray,
+    b: float,
+    c: float,
+    d: float,
+    e: float,
+    pole_p: float,
+    pole_q: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    u = x_arr - pole_p
+    v = y_arr - pole_q
+    near = (np.abs(u) < 1e-12) | (np.abs(v) < 1e-12)
+    u_safe = np.where(near, np.nan, u)
+    v_safe = np.where(near, np.nan, v)
+    zx = b - d / (u_safe * u_safe)
+    zy = c - e / (v_safe * v_safe)
+    zxx = 2.0 * d / (u_safe * u_safe * u_safe)
+    zyy = 2.0 * e / (v_safe * v_safe * v_safe)
+    return zx, zy, zxx, zyy
+
+
+def _surface_hyperbola_mean_curvature_vec(
+    x: np.ndarray,
+    y: np.ndarray,
+    b: float,
+    c: float,
+    d: float,
+    e: float,
+    pole_p: float,
+    pole_q: float,
+) -> np.ndarray:
+    zx, zy, zxx, zyy = _surface_hyperbola_derivatives_vec(
+        x, y, b, c, d, e, pole_p, pole_q,
+    )
+    numer = (1.0 + zy * zy) * zxx + (1.0 + zx * zx) * zyy
+    denom = 2.0 * ((1.0 + zx * zx + zy * zy) ** 1.5)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return numer / denom
+
+
+def _surface_hyperbola_gaussian_curvature_vec(
+    x: np.ndarray,
+    y: np.ndarray,
+    b: float,
+    c: float,
+    d: float,
+    e: float,
+    pole_p: float,
+    pole_q: float,
+) -> np.ndarray:
+    """Gaussian curvature K = (zxx zyy) / (1 + zx² + zy²)² for zxy = 0."""
+    zx, zy, zxx, zyy = _surface_hyperbola_derivatives_vec(
+        x, y, b, c, d, e, pole_p, pole_q,
+    )
+    denom = (1.0 + zx * zx + zy * zy) ** 2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (zxx * zyy) / denom
 
 
 def _load_weld_h5_channels(h5_path: Path) -> tuple[np.ndarray, list[tuple[str, np.ndarray, str, str]]]:
@@ -1575,16 +1678,18 @@ def _mean_median(values: np.ndarray) -> tuple[float, float]:
 
 
 SCAN_CHARACTERISTIC_FIELDS = (
-    "X_curvature",
-    "Y_curvature",
-    "Total_curvature_mean",
-    "Total_curvature_rms",
-    "Surface_curvature",
+    "curvature_x",
+    "curvature_y",
+    "curvature_total_mean",
+    "curvature_total_gaus",
+    "curvature_surface_mean",
+    "curvature_surface_gaus",
 )
 
 WELD_CURRENT_QUANTITY = "current"
 WELD_VOLTAGE_QUANTITY = "voltage"
 WELD_POWER_QUANTITY = "power"
+WELD_DURATION_KIND = "duration"
 
 WELD_CURRENT_STAT_FIELDS = (
     "current_mean",
@@ -1655,6 +1760,7 @@ def list_all_characteristic_keys() -> tuple[str, ...]:
         *WELD_VOLTAGE_CHARACTERISTIC_FIELDS,
         *WELD_POWER_CHARACTERISTIC_FIELDS,
         *WELD_DURATION_CHARACTERISTIC_FIELDS,
+        *PATH_CHARACTERISTIC_FIELDS,
     )
 
 
@@ -1673,11 +1779,38 @@ def _json_safe_characteristic_value(value):
 def _normalize_scan_characteristics(raw) -> dict[str, float]:
     if not isinstance(raw, dict):
         return {}
+    canonical: dict = {}
+    for key, raw_value in raw.items():
+        name = str(key)
+        if name not in SCAN_CHARACTERISTIC_FIELDS:
+            continue
+        value = _json_safe_characteristic_value(raw_value)
+        if value is not None:
+            canonical[name] = value
+
     fields: dict[str, float] = {}
     for key in SCAN_CHARACTERISTIC_FIELDS:
-        value = _json_safe_characteristic_value(raw.get(key))
+        value = canonical.get(key)
         if value is not None:
             fields[key] = value
+
+    if "curvature_total_mean" not in fields or "curvature_total_gaus" not in fields:
+        x_curvature = fields.get("curvature_x")
+        y_curvature = fields.get("curvature_y")
+        if (
+            x_curvature is not None
+            and y_curvature is not None
+            and np.isfinite(x_curvature)
+            and np.isfinite(y_curvature)
+        ):
+            if "curvature_total_mean" not in fields:
+                fields["curvature_total_mean"] = round(
+                    (float(x_curvature) + float(y_curvature)) / 2.0, 9
+                )
+            if "curvature_total_gaus" not in fields:
+                fields["curvature_total_gaus"] = round(
+                    float(x_curvature) * float(y_curvature), 9
+                )
     return fields
 
 
@@ -1699,6 +1832,27 @@ def _normalize_weld_quantity(quantity) -> str:
     if normalized.lower() == WELD_POWER_QUANTITY:
         return WELD_POWER_QUANTITY
     return normalized
+
+
+def _row_has_characteristic_fields(row: dict, fields: tuple[str, ...]) -> bool:
+    return any(
+        key in row and _json_safe_characteristic_value(row.get(key)) is not None
+        for key in fields
+    )
+
+
+def _weld_row_kind(row) -> str:
+    if not isinstance(row, dict):
+        return ""
+    if _row_has_characteristic_fields(row, WELD_CURRENT_CHARACTERISTIC_FIELDS):
+        return WELD_CURRENT_QUANTITY
+    if _row_has_characteristic_fields(row, WELD_VOLTAGE_CHARACTERISTIC_FIELDS):
+        return WELD_VOLTAGE_QUANTITY
+    if _row_has_characteristic_fields(row, WELD_POWER_CHARACTERISTIC_FIELDS):
+        return WELD_POWER_QUANTITY
+    if _row_has_characteristic_fields(row, WELD_DURATION_CHARACTERISTIC_FIELDS):
+        return WELD_DURATION_KIND
+    return ""
 
 
 def _apply_weld_signal_mid_percentiles(
@@ -1768,10 +1922,7 @@ def _serialize_weld_duration_characteristic_row(row: dict) -> dict:
 def _normalize_weld_voltage_characteristic_row(raw: dict) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    quantity = _normalize_weld_quantity(raw.get("quantity", ""))
-    if quantity != WELD_VOLTAGE_QUANTITY:
-        return None
-    row = {"quantity": WELD_VOLTAGE_QUANTITY}
+    row: dict = {}
     has_value = False
     for field in WELD_VOLTAGE_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(raw.get(field))
@@ -1784,7 +1935,7 @@ def _normalize_weld_voltage_characteristic_row(raw: dict) -> dict | None:
 
 
 def _serialize_weld_voltage_characteristic_row(row: dict) -> dict:
-    payload = {"quantity": WELD_VOLTAGE_QUANTITY}
+    payload: dict = {}
     for field in WELD_VOLTAGE_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(row.get(field))
         if value is not None:
@@ -1795,10 +1946,7 @@ def _serialize_weld_voltage_characteristic_row(row: dict) -> dict:
 def _normalize_weld_power_characteristic_row(raw: dict) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    quantity = _normalize_weld_quantity(raw.get("quantity", ""))
-    if quantity != WELD_POWER_QUANTITY:
-        return None
-    row = {"quantity": WELD_POWER_QUANTITY}
+    row: dict = {}
     has_value = False
     for field in WELD_POWER_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(raw.get(field))
@@ -1811,7 +1959,7 @@ def _normalize_weld_power_characteristic_row(raw: dict) -> dict | None:
 
 
 def _serialize_weld_power_characteristic_row(row: dict) -> dict:
-    payload = {"quantity": WELD_POWER_QUANTITY}
+    payload: dict = {}
     for field in WELD_POWER_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(row.get(field))
         if value is not None:
@@ -1841,38 +1989,28 @@ def _split_char_graphen_characteristic_fields(
 def _normalize_weld_characteristic_row(raw: dict) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    quantity = _normalize_weld_quantity(raw.get("quantity", ""))
-    if quantity != WELD_CURRENT_QUANTITY:
-        return None
-    row = {"quantity": quantity}
-    stat_fields = WELD_CURRENT_CHARACTERISTIC_FIELDS
+    row: dict = {}
     has_value = False
-    for field in stat_fields:
+    for field in WELD_CURRENT_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(raw.get(field))
         if value is not None:
             row[field] = value
             has_value = True
     if not has_value:
         return None
-    if quantity == WELD_CURRENT_QUANTITY:
-        row = _apply_weld_mid_percentiles(row)
-    return row
+    return _apply_weld_mid_percentiles(row)
 
 
 def _serialize_weld_characteristic_row(row: dict) -> dict:
-    quantity = _normalize_weld_quantity(row.get("quantity", "")) if "quantity" in row else ""
-    if quantity == WELD_CURRENT_QUANTITY:
-        payload = {
-            "quantity": WELD_CURRENT_QUANTITY,
-        }
-        stat_fields = WELD_CURRENT_CHARACTERISTIC_FIELDS
-    elif quantity == WELD_VOLTAGE_QUANTITY:
+    kind = _weld_row_kind(row)
+    if kind == WELD_VOLTAGE_QUANTITY:
         return _serialize_weld_voltage_characteristic_row(row)
-    elif quantity == WELD_POWER_QUANTITY:
+    if kind == WELD_POWER_QUANTITY:
         return _serialize_weld_power_characteristic_row(row)
-    else:
+    if kind != WELD_CURRENT_QUANTITY:
         return _serialize_weld_duration_characteristic_row(row)
-    for field in stat_fields:
+    payload: dict = {}
+    for field in WELD_CURRENT_CHARACTERISTIC_FIELDS:
         value = _json_safe_characteristic_value(row.get(field))
         if value is not None:
             payload[field] = value
@@ -1892,7 +2030,6 @@ def build_weld_current_characteristic_row(
 
     p02, p98 = np.percentile(finite, [2, 98])
     row = {
-        "quantity": WELD_CURRENT_QUANTITY,
         "current_mean": float(np.mean(finite)),
         "current_std": float(np.std(finite)),
         "current_p02": float(p02),
@@ -1920,7 +2057,6 @@ def build_weld_voltage_characteristic_row(
 
     p02, p98 = np.percentile(finite, [2, 98])
     row = {
-        "quantity": WELD_VOLTAGE_QUANTITY,
         "voltage_mean": float(np.mean(finite)),
         "voltage_std": float(np.std(finite)),
         "voltage_p02": float(p02),
@@ -1951,7 +2087,6 @@ def build_weld_power_characteristic_row(
 
     p02, p98 = np.percentile(finite, [2, 98])
     row = {
-        "quantity": WELD_POWER_QUANTITY,
         "power_mean": float(np.mean(finite)),
         "power_std": float(np.std(finite)),
         "power_p02": float(p02),
@@ -3415,12 +3550,16 @@ def write_characteristics_file(
     *,
     scan_fields: dict | None = None,
     weld_rows: list[dict] | None = None,
+    path_fields: dict | None = None,
 ) -> None:
     payload = {
         "version": 2,
         "scan": _serialize_scan_characteristics(scan_fields or {}),
         "weld": [_serialize_weld_characteristic_row(row) for row in (weld_rows or [])],
     }
+    serialized_path = serialize_path_fields(path_fields or {})
+    if serialized_path:
+        payload["path"] = serialized_path
     output_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -3437,24 +3576,27 @@ def load_characteristics(path: Path) -> dict:
         raise ValueError("Ungültiges Characteristics-JSON: scan/weld fehlt.")
 
     scan_fields = _normalize_scan_characteristics(document.get("scan"))
+    path_fields = normalize_path_fields(document.get("path"))
     weld_rows: list[dict] = []
     for item in document.get("weld") or []:
         if not isinstance(item, dict):
             continue
-        quantity = _normalize_weld_quantity(
-            item.get("quantity", "") if "quantity" in item else "",
-        )
-        if quantity == WELD_CURRENT_QUANTITY:
+        kind = _weld_row_kind(item)
+        if kind == WELD_CURRENT_QUANTITY:
             normalized = _normalize_weld_characteristic_row(item)
-        elif quantity == WELD_VOLTAGE_QUANTITY:
+        elif kind == WELD_VOLTAGE_QUANTITY:
             normalized = _normalize_weld_voltage_characteristic_row(item)
-        elif quantity == WELD_POWER_QUANTITY:
+        elif kind == WELD_POWER_QUANTITY:
             normalized = _normalize_weld_power_characteristic_row(item)
         else:
             normalized = _normalize_weld_duration_characteristic_row(item)
         if normalized is not None:
             weld_rows.append(normalized)
-    return {"scan": scan_fields, "weld": weld_rows}
+    return {
+        "scan": scan_fields,
+        "weld": weld_rows,
+        "path": path_fields,
+    }
 
 
 def load_weld_characteristics(path: Path) -> list[dict]:
@@ -3482,43 +3624,24 @@ def combine_profile_curvatures(
     *,
     x_curvature: float | None,
     y_curvature: float | None,
-    x_r2: float | None,
-    y_r2: float | None,
 ) -> dict[str, float]:
     """
-    Combine X/Y profile curvatures with R² weights:
+    Combine X/Y profile curvatures:
 
-    1) signed weighted mean
-    2) R²-weighted RMS of absolute curvatures
+    1) unweighted mean (κx + κy) / 2
+    2) Gaussian product κx * κy
     """
     values: dict[str, float] = {}
-    terms: list[tuple[float, float]] = []
-
-    for kappa, r2 in ((x_curvature, x_r2), (y_curvature, y_r2)):
-        if kappa is None or r2 is None:
+    kappas: list[float] = []
+    for kappa in (x_curvature, y_curvature):
+        if kappa is None:
             continue
         kappa_f = float(kappa)
-        r2_f = float(r2)
-        if not np.isfinite(kappa_f) or not np.isfinite(r2_f):
-            continue
-        weight = max(r2_f, 0.0)
-        if weight <= 0:
-            continue
-        terms.append((kappa_f, weight))
-
-    if not terms:
-        return values
-
-    weight_sum = float(sum(weight for _kappa, weight in terms))
-    if weight_sum <= 0:
-        return values
-
-    weighted_mean = float(sum(kappa * weight for kappa, weight in terms) / weight_sum)
-    weighted_rms = float(
-        np.sqrt(sum((abs(kappa) ** 2) * weight for kappa, weight in terms) / weight_sum)
-    )
-    values["total_curvature_mean"] = round(weighted_mean, 9)
-    values["total_curvature_rms"] = round(weighted_rms, 9)
+        if np.isfinite(kappa_f):
+            kappas.append(kappa_f)
+    if len(kappas) == 2:
+        values["curvature_total_mean"] = round((kappas[0] + kappas[1]) / 2.0, 9)
+        values["curvature_total_gaus"] = round(kappas[0] * kappas[1], 9)
     return values
 
 
@@ -3527,20 +3650,23 @@ def build_curvature_characteristic_fields(
     x_curvature: float | None = None,
     y_curvature: float | None = None,
     total_curvature_mean: float | None = None,
-    total_curvature_rms: float | None = None,
-    surface_curvature: float | None = None,
+    total_curvature_gaus: float | None = None,
+    surface_curvature_mean: float | None = None,
+    surface_curvature_gaus: float | None = None,
 ) -> dict[str, float]:
     fields: dict[str, float] = {}
     if x_curvature is not None and np.isfinite(x_curvature):
-        fields["X_curvature"] = float(x_curvature)
+        fields["curvature_x"] = float(x_curvature)
     if y_curvature is not None and np.isfinite(y_curvature):
-        fields["Y_curvature"] = float(y_curvature)
+        fields["curvature_y"] = float(y_curvature)
     if total_curvature_mean is not None and np.isfinite(total_curvature_mean):
-        fields["Total_curvature_mean"] = float(total_curvature_mean)
-    if total_curvature_rms is not None and np.isfinite(total_curvature_rms):
-        fields["Total_curvature_rms"] = float(total_curvature_rms)
-    if surface_curvature is not None and np.isfinite(surface_curvature):
-        fields["Surface_curvature"] = float(surface_curvature)
+        fields["curvature_total_mean"] = float(total_curvature_mean)
+    if total_curvature_gaus is not None and np.isfinite(total_curvature_gaus):
+        fields["curvature_total_gaus"] = float(total_curvature_gaus)
+    if surface_curvature_mean is not None and np.isfinite(surface_curvature_mean):
+        fields["curvature_surface_mean"] = float(surface_curvature_mean)
+    if surface_curvature_gaus is not None and np.isfinite(surface_curvature_gaus):
+        fields["curvature_surface_gaus"] = float(surface_curvature_gaus)
     return fields
 
 
@@ -3999,43 +4125,31 @@ def run_analyze_scan(
         "baseline_profile_count": document["baseline_profile_count"],
         "probe_threshold_mm": document["probe_threshold_mm"],
         "source_json_file": scan_path.name,
-        "filter_kernel_size": FILTER_KERNEL_SIZE,
     }
 
     if options["cropped_scan"]:
         _dump_json(scan_dir / CROPPED_SCAN_FILENAME, document, compact=True)
         result["scan_file"] = CROPPED_SCAN_FILENAME
 
-    if options["64_64_scan"]:
-        grid_document = generate_64_64_scan_document(document)
-        _dump_json(scan_dir / SCAN_64_64_FILENAME, grid_document, compact=True)
-        result["64_64_scan_file"] = SCAN_64_64_FILENAME
+    center_document = None
+    if options["cropped_center"]:
+        center_document = generate_cropped_center_document(document)
+        _dump_json(scan_dir / CROPPED_CENTER_FILENAME, center_document, compact=True)
+        result["cropped_center_file"] = CROPPED_CENTER_FILENAME
+        result["center_crop_margin_mm"] = CROPPED_CENTER_MARGIN_MM
 
-    filtered_document = None
-    if (
-        options["filtered"]
-        or options["x_profile"]
-        or options["y_profile"]
-        or options["characteristics"]
-    ):
-        filtered_document = generate_filtered_scan_document(document)
-        if options["filtered"]:
-            _dump_json(scan_dir / FILTERED_SCAN_FILENAME, filtered_document, compact=True)
-            result["filtered_scan_file"] = FILTERED_SCAN_FILENAME
+    kennwerte_source = center_document if center_document is not None else document
 
     if options["x_profile"] or options["y_profile"]:
-        if filtered_document is None:
-            filtered_document = generate_filtered_scan_document(document)
-
         x_profile = None
         y_profile = None
         if options["x_profile"]:
-            x_profile = generate_x_profile_document(filtered_document)
+            x_profile = generate_x_profile_document(kennwerte_source)
             _dump_json(scan_dir / X_PROFILE_FILENAME, x_profile)
             result["x_profile_file"] = X_PROFILE_FILENAME
             result["x_profile_point_count"] = x_profile["point_count"]
         if options["y_profile"]:
-            y_profile = generate_y_profile_document(filtered_document)
+            y_profile = generate_y_profile_document(kennwerte_source)
             _dump_json(scan_dir / Y_PROFILE_FILENAME, y_profile)
             result["y_profile_file"] = Y_PROFILE_FILENAME
             result["y_profile_point_count"] = y_profile["point_count"]
@@ -4052,21 +4166,21 @@ def run_analyze_scan(
             combined = combine_profile_curvatures(
                 x_curvature=x_curvature,
                 y_curvature=y_curvature,
-                x_r2=x_hyperbola.get("r2"),
-                y_r2=y_hyperbola.get("r2"),
             )
             result.update(
                 {
-                    "x_curvature": x_curvature,
-                    "y_curvature": y_curvature,
+                    "curvature_x": x_curvature,
+                    "curvature_y": y_curvature,
                     **combined,
                 },
             )
 
-    if filtered_document is not None:
-        surface = compute_filtered_surface_curvature(filtered_document)
+    if options["characteristics"]:
+        surface = compute_surface_curvature(kennwerte_source)
         if surface is not None:
-            result["surface_curvature"] = surface["curvature_1_per_m"]
+            result["curvature_surface_mean"] = surface["curvature_1_per_m"]
+            if surface.get("gaussian_1_per_m2") is not None:
+                result["curvature_surface_gaus"] = surface["gaussian_1_per_m2"]
 
     return result
 
@@ -4197,23 +4311,17 @@ def run_analyze_weld(
                             if current_row is not None:
                                 current_row.update(current_char_fields)
                             else:
-                                weld_characteristic_rows.append(
-                                    {"quantity": WELD_CURRENT_QUANTITY, **current_char_fields},
-                                )
+                                weld_characteristic_rows.append(dict(current_char_fields))
                         if voltage_char_fields:
                             if voltage_row is not None:
                                 voltage_row.update(voltage_char_fields)
                             else:
-                                weld_characteristic_rows.append(
-                                    {"quantity": WELD_VOLTAGE_QUANTITY, **voltage_char_fields},
-                                )
+                                weld_characteristic_rows.append(dict(voltage_char_fields))
                         if power_char_fields:
                             if power_row is not None:
                                 power_row.update(power_char_fields)
                             else:
-                                weld_characteristic_rows.append(
-                                    {"quantity": WELD_POWER_QUANTITY, **power_char_fields},
-                                )
+                                weld_characteristic_rows.append(dict(power_char_fields))
                         if duration_char_fields:
                             duration_row = _normalize_weld_duration_characteristic_row(duration_char_fields)
                             if duration_row is not None:
@@ -4230,11 +4338,12 @@ def run_analyze_weld(
 
 def _characteristic_document_from_analyze_result(result: dict) -> dict:
     scan_fields = build_curvature_characteristic_fields(
-        x_curvature=result.get("x_curvature"),
-        y_curvature=result.get("y_curvature"),
-        total_curvature_mean=result.get("total_curvature_mean"),
-        total_curvature_rms=result.get("total_curvature_rms"),
-        surface_curvature=result.get("surface_curvature"),
+        x_curvature=result.get("curvature_x"),
+        y_curvature=result.get("curvature_y"),
+        total_curvature_mean=result.get("curvature_total_mean"),
+        total_curvature_gaus=result.get("curvature_total_gaus"),
+        surface_curvature_mean=result.get("curvature_surface_mean"),
+        surface_curvature_gaus=result.get("curvature_surface_gaus"),
     )
     weld_rows = list(result.get("weld_characteristic_rows") or [])
     return {"scan": scan_fields, "weld": weld_rows}
@@ -4254,6 +4363,7 @@ def run_analyze(
     scan_generate_options: dict[str, bool] | None = None,
     weld_generate_options: dict[str, bool] | None = None,
     output_folder: Path | None = None,
+    path_id: str | None = None,
 ) -> dict:
     if scan_path is None and weld_path is None:
         raise ValueError("Weder Scan- noch Weld-Datei vorhanden.")
@@ -4339,11 +4449,12 @@ def run_analyze(
 
         if write_scan_characteristics:
             scan_fields = build_curvature_characteristic_fields(
-                x_curvature=result.get("x_curvature"),
-                y_curvature=result.get("y_curvature"),
-                total_curvature_mean=result.get("total_curvature_mean"),
-                total_curvature_rms=result.get("total_curvature_rms"),
-                surface_curvature=result.get("surface_curvature"),
+                x_curvature=result.get("curvature_x"),
+                y_curvature=result.get("curvature_y"),
+                total_curvature_mean=result.get("curvature_total_mean"),
+                total_curvature_gaus=result.get("curvature_total_gaus"),
+                surface_curvature_mean=result.get("curvature_surface_mean"),
+                surface_curvature_gaus=result.get("curvature_surface_gaus"),
             )
         elif existing_doc:
             scan_fields = dict(existing_doc.get("scan") or {})
@@ -4357,11 +4468,21 @@ def run_analyze(
         else:
             weld_rows = []
 
-        if scan_fields or weld_rows:
+        path_fields = {}
+        if existing_doc:
+            path_fields = dict(existing_doc.get("path") or {})
+        computed_path = build_path_fields_for_experiment(
+            path_id=path_id,
+        )
+        if computed_path:
+            path_fields = computed_path
+
+        if scan_fields or weld_rows or path_fields:
             write_characteristics_file(
                 char_path,
                 scan_fields=scan_fields,
                 weld_rows=weld_rows,
+                path_fields=path_fields,
             )
             result["characteristics_file"] = CHARACTERISTICS_FILENAME
         elif char_path.is_file():
