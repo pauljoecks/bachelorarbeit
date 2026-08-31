@@ -12,9 +12,15 @@
         <div class="nav-links">
           <a
             href="/"
-            class="nav-link{% if active_page == 'evaluate' %} active{% endif %}"
-            {% if active_page == 'evaluate' %}aria-current="page"{% endif %}
-            >Evaluate</a
+            class="nav-link{% if active_page == 'trainieren' %} active{% endif %}"
+            {% if active_page == 'trainieren' %}aria-current="page"{% endif %}
+            >Trainieren</a
+          >
+          <a
+            href="/testen"
+            class="nav-link{% if active_page == 'testen' %} active{% endif %}"
+            {% if active_page == 'testen' %}aria-current="page"{% endif %}
+            >Testen</a
           >
         </div>
         <div class="nav-id" aria-hidden="true">

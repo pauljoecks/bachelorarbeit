@@ -241,6 +241,10 @@
             <span>Heatmap center</span>
           </label>
           <label class="analyzing-weld-sidebar-toggle">
+            <input type="checkbox" data-graph="heatmap_hyperbola" />
+            <span>Heatmap Hyperbel</span>
+          </label>
+          <label class="analyzing-weld-sidebar-toggle">
             <input type="checkbox" data-graph="x_profile" />
             <span>X_profile</span>
           </label>
@@ -358,6 +362,26 @@
             </label>
           </div>
         </div>
+
+        {% if mixed_characteristic_keys %}
+        <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
+          <div class="menu-table-header">
+            <p class="menu-table-count">Mixed</p>
+          </div>
+          <div class="analyzing-weld-sidebar-toggles" id="analyzing-value-mixed-toggles">
+            <label class="analyzing-weld-sidebar-toggle">
+              <input type="checkbox" id="analyzing-value-mixed-select-all" class="analyzing-value-mixed-select-all" aria-label="Alle Mixed-Werte auswählen" />
+              <span>Alle auswählen</span>
+            </label>
+            {% for key in mixed_characteristic_keys %}
+            <label class="analyzing-weld-sidebar-toggle">
+              <input type="checkbox" class="analyzing-value-column-select analyzing-value-mixed-select" data-value-column="{{ key }}" />
+              <span title="{{ key }}">{{ key }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
 
         <div class="analyzing-weld-controls-section analyzing-correlate-controls-section">
           <div class="menu-table-header">
@@ -526,6 +550,15 @@
     </div>
   </div>
 
+  <div class="analyzing-heatmap-panel" data-graph-panel="heatmap_hyperbola" hidden>
+    <canvas id="analyzing-heatmap-hyperbola-canvas" aria-label="2D-Hyperbel-Heatmap"></canvas>
+    <div class="analyzing-heatmap-legend" aria-hidden="true">
+      <span id="analyzing-heatmap-hyperbola-scale-min">–</span>
+      <span class="analyzing-heatmap-legend-bar"></span>
+      <span id="analyzing-heatmap-hyperbola-scale-max">–</span>
+    </div>
+  </div>
+
   <div class="analyzing-graph-wrap" data-graph-panel="x_profile" hidden>
     <canvas id="analyzing-x-profile-canvas"></canvas>
   </div>
@@ -567,7 +600,6 @@
       <thead>
         <tr>
           <th scope="col">Größe</th>
-          <th scope="col">Kategorie</th>
           <th scope="col">Wert</th>
         </tr>
       </thead>
@@ -1059,7 +1091,7 @@
     const scanPathIdEl = document.getElementById("analyzing-scan-path-id");
     const scanWfsEl = document.getElementById("analyzing-scan-wfs");
     const scanWsEl = document.getElementById("analyzing-scan-ws");
-    const GRAPH_VISIBILITY_STORAGE_KEY = "analyzing-scan-graph-visibility-v10";
+    const GRAPH_VISIBILITY_STORAGE_KEY = "analyzing-scan-graph-visibility-v11";
     const SCAN_FEATURE_VISIBILITY_STORAGE_KEY = "analyzing-scan-feature-visibility-v3";
     const DEFAULT_GRAPH_VISIBILITY = {
       raw: true,
@@ -1067,6 +1099,7 @@
       heatmap: false,
       cropped_center: false,
       heatmap_center: false,
+      heatmap_hyperbola: false,
       x_profile: false,
       y_profile: false,
     };
@@ -1090,6 +1123,7 @@
     let heatmapViews = {
       heatmap: { data: null, profileIndex: 0, xAxisRange: null },
       heatmap_center: { data: null, profileIndex: 0, xAxisRange: null },
+      heatmap_hyperbola: { data: null, profileIndex: 0, xAxisRange: null },
     };
     let isLoadingGraphs = false;
     let profileYValues = [];
@@ -2341,11 +2375,30 @@
           scaleMaxEl: document.getElementById("analyzing-heatmap-center-scale-max"),
         };
       }
+      if (viewKey === "heatmap_hyperbola") {
+        return {
+          canvas: document.getElementById("analyzing-heatmap-hyperbola-canvas"),
+          scaleMinEl: document.getElementById("analyzing-heatmap-hyperbola-scale-min"),
+          scaleMaxEl: document.getElementById("analyzing-heatmap-hyperbola-scale-max"),
+        };
+      }
       return {
         canvas: heatmapCanvas,
         scaleMinEl: document.getElementById("analyzing-heatmap-scale-min"),
         scaleMaxEl: document.getElementById("analyzing-heatmap-scale-max"),
       };
+    }
+
+    function redrawStoredHeatmaps(profileIndex = null) {
+      const index = Number.isFinite(profileIndex)
+        ? profileIndex
+        : Number.parseInt(profileSlider?.value ?? "0", 10);
+      Object.keys(heatmapViews).forEach((key) => {
+        const viewState = heatmapViews[key];
+        if (viewState?.data) {
+          renderHeatmap(viewState.data, index, viewState.xAxisRange, key);
+        }
+      });
     }
 
     function renderHeatmap(
@@ -2609,6 +2662,15 @@
             })),
           ]);
         }
+        if (isGraphVisible("heatmap_hyperbola")) {
+          requestEntries.push([
+            "heatmap_hyperbola",
+            fetch(`/api/generate/${encodeURIComponent(id)}/heatmap-hyperbola`).then(async (response) => ({
+              response,
+              data: await response.json(),
+            })),
+          ]);
+        }
         if (isGraphVisible("x_profile")) {
           requestEntries.push([
             "x_profile",
@@ -2641,6 +2703,7 @@
         const scanResult = results.raw ?? null;
         const heatmapResult = results.heatmap ?? null;
         const centerHeatmapResult = results.heatmap_center ?? null;
+        const hyperbolaHeatmapResult = results.heatmap_hyperbola ?? null;
         const xProfileResult = results.x_profile ?? null;
         const yProfileResult = results.y_profile ?? null;
         const paramsResult = results.params ?? null;
@@ -2659,6 +2722,7 @@
           scanResult?.response?.ok ? scanResult.data.profile_count : 0,
           heatmapResult?.response?.ok ? heatmapResult.data.profile_count : 0,
           centerHeatmapResult?.response?.ok ? centerHeatmapResult.data.profile_count : 0,
+          hyperbolaHeatmapResult?.response?.ok ? hyperbolaHeatmapResult.data.profile_count : 0,
         );
         const sharedXAxisRange = scanResult?.response?.ok
           ? boundsToRange(scanResult.data.x_bounds) ?? getXAxisRange(scanResult.data)
@@ -2671,6 +2735,9 @@
             heatmapResult?.response?.ok ? getHeatmapXAxisRange(heatmapResult.data) : null,
             centerHeatmapResult?.response?.ok
               ? getHeatmapXAxisRange(centerHeatmapResult.data)
+              : null,
+            hyperbolaHeatmapResult?.response?.ok
+              ? getHeatmapXAxisRange(hyperbolaHeatmapResult.data)
               : null,
           );
 
@@ -2780,6 +2847,7 @@
                   (
                     heatmapResult?.data?.profile_count
                     ?? centerHeatmapResult?.data?.profile_count
+                    ?? hyperbolaHeatmapResult?.data?.profile_count
                     ?? 1
                   ) - 1,
                   0,
@@ -2795,7 +2863,9 @@
                 ? heatmapResult.data.y_mm[activeProfileIndex]
                 : Array.isArray(centerHeatmapResult?.data?.y_mm)
                   ? centerHeatmapResult.data.y_mm[activeProfileIndex]
-                  : null;
+                  : Array.isArray(hyperbolaHeatmapResult?.data?.y_mm)
+                    ? hyperbolaHeatmapResult.data.y_mm[activeProfileIndex]
+                    : null;
 
         if (isGraphVisible("heatmap") && heatmapResult?.response?.ok) {
           if (Array.isArray(heatmapResult.data.y_mm)) {
@@ -2818,9 +2888,23 @@
         } else {
           clearHeatmap("heatmap_center");
         }
+        if (isGraphVisible("heatmap_hyperbola") && hyperbolaHeatmapResult?.response?.ok) {
+          if (Array.isArray(hyperbolaHeatmapResult.data.y_mm) && !profileYValues.length) {
+            profileYValues = hyperbolaHeatmapResult.data.y_mm;
+          }
+          renderHeatmap(
+            hyperbolaHeatmapResult.data,
+            activeProfileIndex,
+            sharedXAxisRange,
+            "heatmap_hyperbola",
+          );
+        } else {
+          clearHeatmap("heatmap_hyperbola");
+        }
         if (
           !(isGraphVisible("heatmap") && heatmapResult?.response?.ok)
           && !(isGraphVisible("heatmap_center") && centerHeatmapResult?.response?.ok)
+          && !(isGraphVisible("heatmap_hyperbola") && hyperbolaHeatmapResult?.response?.ok)
           && (isGraphVisible("raw") || isGraphVisible("cropped") || isGraphVisible("cropped_center"))
         ) {
           await loadProfileYValues(id);
@@ -2835,6 +2919,7 @@
           && !heatmapResult?.response?.ok
           && !centerResult?.response?.ok
           && !centerHeatmapResult?.response?.ok
+          && !hyperbolaHeatmapResult?.response?.ok
           && !xProfileResult?.response?.ok
           && !yProfileResult?.response?.ok
         ) {
@@ -2917,24 +3002,7 @@
         scanFeatureVisibility[input.dataset.scanFeature] = input.checked;
         persistScanFeatureVisibility();
 
-        if (heatmapViews.heatmap.data) {
-          const profileIndex = Number.parseInt(profileSlider?.value ?? "0", 10);
-          renderHeatmap(
-            heatmapViews.heatmap.data,
-            profileIndex,
-            heatmapViews.heatmap.xAxisRange,
-            "heatmap",
-          );
-        }
-        if (heatmapViews.heatmap_center.data) {
-          const profileIndex = Number.parseInt(profileSlider?.value ?? "0", 10);
-          renderHeatmap(
-            heatmapViews.heatmap_center.data,
-            profileIndex,
-            heatmapViews.heatmap_center.xAxisRange,
-            "heatmap_center",
-          );
-        }
+        redrawStoredHeatmaps();
         redrawCachedAxisProfileCharts();
       });
     }
@@ -2951,22 +3019,7 @@
           );
         }
 
-        if (heatmapViews.heatmap.data) {
-          renderHeatmap(
-            heatmapViews.heatmap.data,
-            activeIndex,
-            heatmapViews.heatmap.xAxisRange,
-            "heatmap",
-          );
-        }
-        if (heatmapViews.heatmap_center.data) {
-          renderHeatmap(
-            heatmapViews.heatmap_center.data,
-            activeIndex,
-            heatmapViews.heatmap_center.xAxisRange,
-            "heatmap_center",
-          );
-        }
+        redrawStoredHeatmaps(activeIndex);
       });
 
       profileSlider.addEventListener("change", () => {
@@ -2980,27 +3033,16 @@
       });
     }
 
-    if (heatmapCanvas || document.getElementById("analyzing-heatmap-center-canvas")) {
+    if (
+      heatmapCanvas
+      || document.getElementById("analyzing-heatmap-center-canvas")
+      || document.getElementById("analyzing-heatmap-hyperbola-canvas")
+    ) {
       window.addEventListener("resize", () => {
         analyzingChart?.resize();
         scanningChart?.resize();
         centerChart?.resize();
-        if (heatmapViews.heatmap.data) {
-          renderHeatmap(
-            heatmapViews.heatmap.data,
-            heatmapViews.heatmap.profileIndex,
-            heatmapViews.heatmap.xAxisRange,
-            "heatmap",
-          );
-        }
-        if (heatmapViews.heatmap_center.data) {
-          renderHeatmap(
-            heatmapViews.heatmap_center.data,
-            heatmapViews.heatmap_center.profileIndex,
-            heatmapViews.heatmap_center.xAxisRange,
-            "heatmap_center",
-          );
-        }
+        redrawStoredHeatmaps();
       });
     }
 
@@ -5190,33 +5232,37 @@
     const VALUE_META_COLUMNS = [
       { key: "count", label: "COUNT" },
       { key: "id", label: "ID" },
-      { key: "path_id", label: "PATH ID" },
       { key: "wfs", label: "WFS" },
       { key: "ws", label: "WS" },
       { key: "series", label: "SERIES" },
       { key: "number", label: "NUMBER" },
     ];
+    const VALUE_PATH_ID_COLUMN = { key: "path_id", label: "PATH ID" };
     const VALUE_TARGET_COLUMNS = [
       ...{{ target_characteristic_keys | tojson }},
     ];
     const VALUE_KENNWERT_COLUMNS = {{ weld_characteristic_keys | tojson }};
     const VALUE_PATH_COLUMNS = [...{{ path_characteristic_keys | tojson }}];
+    const VALUE_MIXED_COLUMNS = [...{{ mixed_characteristic_keys | default([]) | tojson }}];
     const VALUE_COLUMN_ORDER = [
       ...VALUE_TARGET_COLUMNS,
+      VALUE_PATH_ID_COLUMN.key,
       ...VALUE_META_COLUMNS.map((column) => column.key),
+      ...VALUE_MIXED_COLUMNS,
       ...VALUE_PATH_COLUMNS,
       ...VALUE_KENNWERT_COLUMNS,
     ];
     const VALUE_COLUMN_LABELS = Object.fromEntries([
+      [VALUE_PATH_ID_COLUMN.key, VALUE_PATH_ID_COLUMN.label],
       ...VALUE_META_COLUMNS.map((column) => [column.key, column.label]),
       ...VALUE_TARGET_COLUMNS.map((key) => [key, key]),
+      ...VALUE_MIXED_COLUMNS.map((key) => [key, key]),
       ...VALUE_PATH_COLUMNS.map((key) => [key, key]),
       ...VALUE_KENNWERT_COLUMNS.map((key) => [key, key]),
     ]);
-    const VALUE_COLUMN_CATEGORIES = {{ view_value_column_categories | default({}) | tojson }};
     const VALUE_META_KEYS = new Set(VALUE_META_COLUMNS.map((column) => column.key));
     const VIEW_EXCEL_BY_ID = {{ view_excel_by_id | default({}) | tojson }};
-    const VALUE_STORAGE_KEY = "analyzing-value-columns-v6";
+    const VALUE_STORAGE_KEY = "analyzing-value-columns-v7";
 
     const valueTableWrapper = document.querySelector(".analyzing-value-table-wrapper");
     const valueTable = document.getElementById("analyzing-value-table");
@@ -5225,6 +5271,7 @@
     const valueRoot = document.querySelector(".analyzing-value-controls-sidebar");
     const selectAllKennwerte = document.getElementById("analyzing-value-kennwerte-select-all");
     const selectAllPath = document.getElementById("analyzing-value-path-select-all");
+    const selectAllMixed = document.getElementById("analyzing-value-mixed-select-all");
 
     if (!valueTable || !valueRoot) {
       return;
@@ -5240,6 +5287,10 @@
 
     function getPathCheckboxes() {
       return Array.from(valueRoot.querySelectorAll("input.analyzing-value-path-select[data-value-column]"));
+    }
+
+    function getMixedCheckboxes() {
+      return Array.from(valueRoot.querySelectorAll("input.analyzing-value-mixed-select[data-value-column]"));
     }
 
     function getTargetCheckboxes() {
@@ -5329,6 +5380,25 @@
       selectAllPath.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
     }
 
+    function syncMixedSelectAll() {
+      if (!selectAllMixed) {
+        return;
+      }
+
+      const checkboxes = getMixedCheckboxes();
+      selectAllMixed.disabled = checkboxes.length === 0;
+
+      if (checkboxes.length === 0) {
+        selectAllMixed.checked = false;
+        selectAllMixed.indeterminate = false;
+        return;
+      }
+
+      const checkedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
+      selectAllMixed.checked = checkedCount === checkboxes.length;
+      selectAllMixed.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+    }
+
     function restoreValueColumnSelections() {
       const stored = loadStoredValueColumns();
       if (stored) {
@@ -5339,6 +5409,7 @@
       }
       syncKennwerteSelectAll();
       syncPathSelectAll();
+      syncMixedSelectAll();
       restoreSingleTarget();
     }
 
@@ -5448,6 +5519,15 @@
           }
         });
       }
+      const mixed = data?.mixed;
+      if (mixed && typeof mixed === "object" && !Array.isArray(mixed)) {
+        Object.entries(mixed).forEach(([key, value]) => {
+          const number = Number(value);
+          if (Number.isFinite(number)) {
+            map[key] = number;
+          }
+        });
+      }
       return map;
     }
 
@@ -5504,7 +5584,6 @@
           return `
             <tr class="menu-table-row analyzing-value-row">
               <th scope="row" class="analyzing-value-label" title="${label}">${label}</th>
-              <td class="analyzing-value-category">${VALUE_COLUMN_CATEGORIES[key] || ""}</td>
               <td class="analyzing-value-cell" title="${titleValue.replace(/"/g, "&quot;")}">${displayValue}</td>
             </tr>
           `;
@@ -5561,6 +5640,7 @@
         }
         syncKennwerteSelectAll();
         syncPathSelectAll();
+        syncMixedSelectAll();
         persistValueColumns();
         if (window.getActiveAnalyzingView?.() === "value") {
           reloadAnalyzingValueTable();
@@ -5586,6 +5666,18 @@
         checkbox.checked = checked;
       });
       selectAllPath.indeterminate = false;
+      persistValueColumns();
+      if (window.getActiveAnalyzingView?.() === "value") {
+        reloadAnalyzingValueTable();
+      }
+    });
+
+    selectAllMixed?.addEventListener("change", () => {
+      const checked = selectAllMixed.checked;
+      getMixedCheckboxes().forEach((checkbox) => {
+        checkbox.checked = checked;
+      });
+      selectAllMixed.indeterminate = false;
       persistValueColumns();
       if (window.getActiveAnalyzingView?.() === "value") {
         reloadAnalyzingValueTable();

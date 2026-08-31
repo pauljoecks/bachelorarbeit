@@ -62,11 +62,8 @@ VIEW_EXCEL_VALUE_FIELDS = (
     ("SERIES", "series"),
     ("NUMBER", "number"),
 )
+VIEW_PATH_ID_KEY = "path_id"
 VIEW_META_KEYS = frozenset(key for _column, key in VIEW_EXCEL_VALUE_FIELDS)
-VIEW_VALUE_CATEGORY_DEFAULT = "Default"
-VIEW_VALUE_CATEGORY_TARGET = "Zielgröße"
-VIEW_VALUE_CATEGORY_PATH = "Pfad"
-VIEW_VALUE_CATEGORY_WELD = "Weld"
 MENU_FILTER_OPTIONS = ["WELDED", "SCANNED", "ID"]
 SCANSPEED_COLUMN = "SCANSPEED [mm/s]"
 ANALYZE_SCAN_FILENAME = "cropped_scan.json"
@@ -78,6 +75,7 @@ ANALYZE_GRENZEN_FILENAME = "grenzen.json"
 ANALYZE_CHAR_GRAPHEN_FILENAME = "char_graphen.json"
 ANALYZE_X_PROFILE_FILENAME = "X_profile.json"
 ANALYZE_Y_PROFILE_FILENAME = "Y_profile.json"
+ANALYZE_HYPERBOLA_2D_FILENAME = "hyperbola_2d.json"
 GENERATE_SCAN_SUBDIR = "scan"
 GENERATE_WELD_SUBDIR = "weld"
 _GENERATE_SCAN_FILES = frozenset(
@@ -86,6 +84,7 @@ _GENERATE_SCAN_FILES = frozenset(
         ANALYZE_CROPPED_CENTER_FILENAME,
         ANALYZE_X_PROFILE_FILENAME,
         ANALYZE_Y_PROFILE_FILENAME,
+        ANALYZE_HYPERBOLA_2D_FILENAME,
     }
 )
 _GENERATE_WELD_FILES = frozenset(
@@ -604,6 +603,8 @@ def _get_view_value_column_labels() -> dict[str, str]:
     labels = {key: column_name for column_name, key in VIEW_EXCEL_VALUE_FIELDS}
     for key in _get_target_characteristic_keys():
         labels[key] = key
+    for key in _get_mixed_characteristic_keys():
+        labels[key] = key
     for key in _get_path_characteristic_keys():
         labels[key] = key
     for key in _get_weld_characteristic_keys():
@@ -615,23 +616,12 @@ def _get_view_value_column_order() -> tuple[str, ...]:
     meta_keys = tuple(key for _column_name, key in VIEW_EXCEL_VALUE_FIELDS)
     return (
         _get_target_characteristic_keys()
-        + meta_keys
+        + (VIEW_PATH_ID_KEY,)
+        + tuple(key for key in meta_keys if key != VIEW_PATH_ID_KEY)
+        + _get_mixed_characteristic_keys()
         + _get_path_characteristic_keys()
         + _get_weld_characteristic_keys()
     )
-
-
-def _get_view_value_column_categories() -> dict[str, str]:
-    categories: dict[str, str] = {}
-    for _column_name, key in VIEW_EXCEL_VALUE_FIELDS:
-        categories[key] = VIEW_VALUE_CATEGORY_DEFAULT
-    for key in _get_target_characteristic_keys():
-        categories[key] = VIEW_VALUE_CATEGORY_TARGET
-    for key in _get_path_characteristic_keys():
-        categories[key] = VIEW_VALUE_CATEGORY_PATH
-    for key in _get_weld_characteristic_keys():
-        categories[key] = VIEW_VALUE_CATEGORY_WELD
-    return categories
 
 
 def _characteristics_document_to_value_map(document) -> dict[str, float | str]:
@@ -663,6 +653,14 @@ def _characteristics_document_to_value_map(document) -> dict[str, float | str]:
     path_fields = document.get("path")
     if isinstance(path_fields, dict):
         for key, value in path_fields.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                number = float(value)
+                if np.isfinite(number):
+                    values[str(key)] = number
+
+    mixed_fields = document.get("mixed")
+    if isinstance(mixed_fields, dict):
+        for key, value in mixed_fields.items():
             if isinstance(value, (int, float, np.integer, np.floating)):
                 number = float(value)
                 if np.isfinite(number):
@@ -979,8 +977,56 @@ def _load_scanning_profile_graph(
     }
 
 
-def _load_generate_scan_heatmap(analyze_path):
-    document = _load_scan_document(analyze_path)
+def _heatmap_z_scale_from_positive_values(positive_values):
+    if not positive_values:
+        return 0.0, 0.0
+    sorted_values = sorted(positive_values)
+    lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
+    upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
+    z_scale_min = float(sorted_values[lower_index])
+    z_scale_max = float(sorted_values[upper_index])
+    if z_scale_max <= z_scale_min:
+        z_scale_min = float(sorted_values[0])
+        z_scale_max = float(sorted_values[-1])
+    return z_scale_min, z_scale_max
+
+
+def _heatmap_positive_z_values(document):
+    profiles = document.get("profiles") or []
+    if not profiles:
+        return []
+    resolution = int(document.get("resolution") or len(profiles[0].get("x_mm") or []))
+    positive_values = []
+    for profile in profiles:
+        z_row = profile.get("z_mm") or []
+        if resolution and len(z_row) != resolution:
+            continue
+        positive_values.extend(float(value) for value in z_row if float(value) > 0)
+    return positive_values
+
+
+def _heatmap_z_scale_from_document(document):
+    return _heatmap_z_scale_from_positive_values(_heatmap_positive_z_values(document))
+
+
+def _shared_scan_heatmap_z_scale(folder_path):
+    """Percentile z-scale from measured cropped_center, else cropped_scan."""
+    if folder_path is None:
+        return None
+    for filename in (ANALYZE_CROPPED_CENTER_FILENAME, ANALYZE_SCAN_FILENAME):
+        path = _find_generated_file(folder_path, filename)
+        if path is None:
+            continue
+        try:
+            z_min, z_max = _heatmap_z_scale_from_document(_load_scan_document(path))
+        except (OSError, TypeError, ValueError):
+            continue
+        if z_max > z_min:
+            return z_min, z_max
+    return None
+
+
+def _heatmap_payload_from_scan_document(document, *, json_file, z_scale=None):
     profiles = document.get("profiles") or []
     if not profiles:
         raise ValueError("Keine Profile in Analyse-Datei gefunden.")
@@ -1005,17 +1051,10 @@ def _load_generate_scan_heatmap(analyze_path):
         values.extend(z_row)
         positive_values.extend(value for value in z_row if value > 0)
 
-    z_scale_min = 0.0
-    z_scale_max = 0.0
-    if positive_values:
-        sorted_values = sorted(positive_values)
-        lower_index = max(0, int(len(sorted_values) * 0.02) - 1)
-        upper_index = min(len(sorted_values) - 1, int(len(sorted_values) * 0.98))
-        z_scale_min = float(sorted_values[lower_index])
-        z_scale_max = float(sorted_values[upper_index])
-        if z_scale_max <= z_scale_min:
-            z_scale_min = float(sorted_values[0])
-            z_scale_max = float(sorted_values[-1])
+    if z_scale is not None and len(z_scale) == 2 and z_scale[1] > z_scale[0]:
+        z_scale_min, z_scale_max = float(z_scale[0]), float(z_scale[1])
+    else:
+        z_scale_min, z_scale_max = _heatmap_z_scale_from_positive_values(positive_values)
 
     y_mm = _get_profile_y_mm_values(
         document,
@@ -1024,7 +1063,7 @@ def _load_generate_scan_heatmap(analyze_path):
     )
 
     return {
-        "json_file": analyze_path.name,
+        "json_file": json_file,
         "profile_count": profile_count,
         "resolution": resolution,
         "x_min": x_min,
@@ -1037,6 +1076,40 @@ def _load_generate_scan_heatmap(analyze_path):
         "z_scale_max": z_scale_max,
         "values": values,
     }
+
+
+def _load_generate_scan_heatmap(analyze_path):
+    document = _load_scan_document(analyze_path)
+    z_scale = _shared_scan_heatmap_z_scale(_generated_folder_root(analyze_path))
+    return _heatmap_payload_from_scan_document(
+        document,
+        json_file=analyze_path.name,
+        z_scale=z_scale,
+    )
+
+
+def _load_generate_scan_hyperbola_heatmap(center_path, hyperbola_path=None):
+    run_analyze = _import_run_analyze()
+    document = _load_scan_document(center_path)
+    coeffs = None
+    if hyperbola_path is not None and Path(hyperbola_path).is_file():
+        try:
+            coeffs = run_analyze.load_surface_hyperbola(hyperbola_path)
+        except ValueError:
+            coeffs = None
+    if coeffs is None:
+        coeffs = run_analyze.compute_surface_curvature(document)
+        if coeffs is None:
+            raise ValueError("2D-Hyperbel konnte nicht aus cropped_center berechnet werden.")
+    fitted = run_analyze.scan_document_with_surface_hyperbola(document, coeffs)
+    z_scale = _shared_scan_heatmap_z_scale(_generated_folder_root(center_path))
+    if z_scale is None:
+        z_scale = _heatmap_z_scale_from_document(document)
+    return _heatmap_payload_from_scan_document(
+        fitted,
+        json_file=ANALYZE_HYPERBOLA_2D_FILENAME,
+        z_scale=z_scale,
+    )
 
 
 def _resolve_scan_path_for_experiment(experiment_id):
@@ -1727,6 +1800,10 @@ def _get_path_characteristic_keys() -> tuple[str, ...]:
     return _import_run_analyze().list_path_characteristic_keys()
 
 
+def _get_mixed_characteristic_keys() -> tuple[str, ...]:
+    return _import_run_analyze().list_mixed_characteristic_keys()
+
+
 @app.context_processor
 def inject_nav_context():
     return {
@@ -1738,7 +1815,7 @@ def inject_nav_context():
         "target_characteristic_keys": _get_target_characteristic_keys(),
         "weld_characteristic_keys": _get_weld_characteristic_keys(),
         "path_characteristic_keys": _get_path_characteristic_keys(),
-        "view_value_column_categories": _get_view_value_column_categories(),
+        "mixed_characteristic_keys": _get_mixed_characteristic_keys(),
         "scan_generate_keys": _import_run_analyze().SCAN_GENERATE_KEYS,
         "weld_generate_keys": _import_run_analyze().WELD_GENERATE_KEYS,
     }
@@ -1840,6 +1917,19 @@ def export_view_values():
         filtered_columns.append(key)
     columns = filtered_columns
 
+    selected = set(columns)
+    selected.add(VIEW_PATH_ID_KEY)
+    target_order = _get_target_characteristic_keys()
+    chosen_target = next((key for key in target_order if key in selected), None)
+    value_columns: list[str] = []
+    if chosen_target:
+        value_columns.append(chosen_target)
+    value_columns.append(VIEW_PATH_ID_KEY)
+    for key in valid_column_order:
+        if key not in selected or key in value_columns:
+            continue
+        value_columns.append(key)
+
     experiment_ids: list[str] = []
     for raw_id in raw_ids:
         normalized = _normalize_id(raw_id)
@@ -1849,18 +1939,14 @@ def export_view_values():
         return jsonify(error="Keine gültigen IDs für den Export angegeben."), 400
 
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Font
+    from openpyxl.styles import Font
 
-    value_columns = [key for key in valid_column_order if key in set(columns)]
     sheet_headers = [column_labels[key] for key in value_columns]
-    column_categories = _get_view_value_column_categories()
-    sheet_categories = [column_categories.get(key, "") for key in value_columns]
 
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "values"
     sheet.append(sheet_headers)
-    sheet.append(sheet_categories)
 
     for experiment_id in experiment_ids:
         source_row = versuchsuebersicht_data["id_index"].get(experiment_id)
@@ -1888,23 +1974,6 @@ def export_view_values():
     for column_index in range(1, len(sheet_headers) + 1):
         header_cell = sheet.cell(1, column_index)
         header_cell.font = Font(bold=True)
-
-    index = 0
-    while index < len(sheet_categories):
-        run_end = index + 1
-        while run_end < len(sheet_categories) and sheet_categories[run_end] == sheet_categories[index]:
-            run_end += 1
-        if run_end - index > 1:
-            sheet.merge_cells(
-                start_row=2,
-                start_column=index + 1,
-                end_row=2,
-                end_column=run_end,
-            )
-        cell = sheet.cell(2, index + 1)
-        cell.font = Font(color="FF64748B")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        index = run_end
 
     buffer = BytesIO()
     workbook.save(buffer)
@@ -2017,6 +2086,7 @@ def run_generate(experiment_id):
             scan_speed_mm_s=scan_speed_mm_s,
             scan_duration_s=scan_duration_s,
             weld_speed_m_per_min=weld_speed_m_per_min,
+            wire_speed_m_per_min=weld_params.get("wfs_m_per_min"),
             scan_generate_options=scan_generate_options,
             weld_generate_options=weld_generate_options,
             output_folder=output_folder,
@@ -2245,6 +2315,36 @@ def get_generate_heatmap_center(experiment_id):
         return jsonify(error=str(exc)), 400
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der cropped_center-Heatmap: {exc}"), 500
+
+
+@app.get("/api/generate/<experiment_id>/heatmap-hyperbola")
+def get_generate_heatmap_hyperbola(experiment_id):
+    if versuchsuebersicht_data is None:
+        return jsonify(error="Keine Versuchsübersicht geladen. Bitte oben auf Laden klicken."), 400
+
+    if not re.fullmatch(r"[A-Z]{3}", experiment_id):
+        return jsonify(error="ID muss aus 3 Großbuchstaben bestehen."), 400
+
+    try:
+        center_path, error = _resolve_analyze_profile_path_for_experiment(
+            experiment_id,
+            ANALYZE_CROPPED_CENTER_FILENAME,
+        )
+        if error:
+            status = 404 if (
+                error.startswith("Kein Analyse-Ordner")
+                or error.startswith(f"{ANALYZE_CROPPED_CENTER_FILENAME} nicht gefunden")
+            ) else 400
+            return jsonify(error=error), status
+
+        folder_path = _generated_folder_root(center_path)
+        hyperbola_path = _find_generated_file(folder_path, ANALYZE_HYPERBOLA_2D_FILENAME)
+        heatmap_data = _load_generate_scan_hyperbola_heatmap(center_path, hyperbola_path)
+        return jsonify(id=experiment_id, **heatmap_data)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception as exc:
+        return jsonify(error=f"Fehler beim Lesen der 2D-Hyperbel-Heatmap: {exc}"), 500
 
 
 @app.get("/api/generate/<experiment_id>/x-profile")
@@ -2498,14 +2598,18 @@ def get_generate_characteristics(experiment_id):
             return jsonify(error="Ungültiges Characteristics-JSON: scan muss ein Objekt sein."), 400
         weld_rows = list((document or {}).get("weld") or [])
         path_fields = dict((document or {}).get("path") or {})
+        mixed_fields = dict((document or {}).get("mixed") or {})
         if not isinstance(path_fields, dict):
             path_fields = {}
+        if not isinstance(mixed_fields, dict):
+            mixed_fields = {}
         return jsonify(
             id=experiment_id,
             file=characteristics_path.name,
             scan=_json_safe(scan_fields),
             weld=_json_safe(weld_rows),
             path=_json_safe(path_fields),
+            mixed=_json_safe(mixed_fields),
         )
     except Exception as exc:
         return jsonify(error=f"Fehler beim Lesen der Characteristics: {exc}"), 500

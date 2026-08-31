@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import threading
 from copy import deepcopy
@@ -24,36 +25,25 @@ EVALUATION_PORT = int(os.environ.get("EVALUATION_PORT", "5002"))
 TRAIN_FILENAME = "train.xlsx"
 TEST_FILENAME = "test.xlsx"
 RESULT_FILENAME = "result.json"
-SELECTION_FILENAME = "selection.json"
 TRAIN_LOG_FILENAME = "train.log"
-TRAIN_STATUS_FILENAME = "train_status.json"
+MODEL_FILENAME = "model.joblib"
+KEEP_ON_RESET = frozenset({TRAIN_FILENAME, TEST_FILENAME})
 LOG_TAIL_LIMIT = 80
-LEARNER_OPTIONS = (
-    ("elasticnet", "Elastic Net"),
-    ("ridge", "Ridge"),
-    ("lasso", "Lasso"),
-)
-CV_OPTIONS = (
-    ("lopo", "Leave-One-Path-Out"),
-    ("kfold", "k-Fold"),
-    ("random", "Random Fold"),
-)
-DEFAULT_LEARNER = "elasticnet"
 DEFAULT_CV = "lopo"
 DEFAULT_CV_FOLDS = 5
-DEFAULT_FEATURE_K = 16
-DEFAULT_FEATURE_K_MODE = "manual"
-FEATURE_K_MIN = 1
-FEATURE_K_MAX = 200
-FEATURE_K_MODES = ("manual", "auto")
-LEARNER_IDS = {item for item, _label in LEARNER_OPTIONS}
+DEFAULT_POLY_DEGREE_MAX = 1
+POLY_DEGREE_MIN = 1
+POLY_DEGREE_MAX = 5
+CV_OPTIONS = (
+    ("lopo", "Leave-One-Path-Out / zufälliger 5-Fold"),
+)
 CV_IDS = {item for item, _label in CV_OPTIONS}
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from run_model import (
-    group_columns_by_category,
+    AUTO_FEATURE_KS,
     load_dataset,
     read_export_columns,
     resolve_training_target,
@@ -70,6 +60,8 @@ _train_lock = threading.Lock()
 _train_thread: threading.Thread | None = None
 _train_model_dir: Path | None = None
 _train_run_id: str | None = None
+_status_lock = threading.Lock()
+_train_status: dict[str, dict] = {}
 
 
 def _evaluation_root(root: Path) -> Path:
@@ -126,87 +118,27 @@ def _model_dir_from_name(name: str) -> Path | None:
     return EVALUATION_ROOT / cleaned
 
 
-def _empty_selection() -> dict:
-    return {
-        "pinned": [],
-        "min_per_category": {},
-        "learner": DEFAULT_LEARNER,
-        "cv": DEFAULT_CV,
-        "cv_folds": DEFAULT_CV_FOLDS,
-        "feature_k": DEFAULT_FEATURE_K,
-        "feature_k_mode": DEFAULT_FEATURE_K_MODE,
-    }
-
-
-def _normalize_selection(raw) -> dict:
-    payload = raw if isinstance(raw, dict) else {}
-    pinned = []
-    for item in payload.get("pinned") or []:
-        name = str(item).strip()
-        if name and name not in pinned:
-            pinned.append(name)
-    mins: dict[str, int] = {}
-    raw_mins = payload.get("min_per_category") or {}
-    if isinstance(raw_mins, dict):
-        for key, value in raw_mins.items():
-            category = str(key).strip()
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                continue
-            if category:
-                mins[category] = max(0, number)
-    learner = str(payload.get("learner") or DEFAULT_LEARNER).strip().lower()
-    if learner not in LEARNER_IDS:
-        learner = DEFAULT_LEARNER
-    cv = str(payload.get("cv") or DEFAULT_CV).strip().lower()
-    if cv not in CV_IDS:
-        cv = DEFAULT_CV
+def _clamp_poly_degree_max(value) -> int:
     try:
-        cv_folds = int(payload.get("cv_folds") or DEFAULT_CV_FOLDS)
+        degree = int(value)
     except (TypeError, ValueError):
-        cv_folds = DEFAULT_CV_FOLDS
-    cv_folds = min(20, max(2, cv_folds))
-    try:
-        feature_k = int(payload.get("feature_k") or DEFAULT_FEATURE_K)
-    except (TypeError, ValueError):
-        feature_k = DEFAULT_FEATURE_K
-    feature_k = min(FEATURE_K_MAX, max(FEATURE_K_MIN, feature_k))
-    feature_k_mode = str(payload.get("feature_k_mode") or DEFAULT_FEATURE_K_MODE).strip().lower()
-    if feature_k_mode not in FEATURE_K_MODES:
-        feature_k_mode = DEFAULT_FEATURE_K_MODE
-    return {
-        "pinned": pinned,
-        "min_per_category": mins,
-        "learner": learner,
-        "cv": cv,
-        "cv_folds": cv_folds,
-        "feature_k": feature_k,
-        "feature_k_mode": feature_k_mode,
-    }
+        degree = DEFAULT_POLY_DEGREE_MAX
+    return min(POLY_DEGREE_MAX, max(POLY_DEGREE_MIN, degree))
 
 
-def _selection_path(model_dir: Path) -> Path:
-    return model_dir / SELECTION_FILENAME
-
-
-def _load_selection(model_dir: Path) -> dict:
-    path = _selection_path(model_dir)
-    if not path.is_file():
-        return _empty_selection()
-    try:
-        return _normalize_selection(json.loads(path.read_text(encoding="utf-8")))
-    except Exception:
-        return _empty_selection()
-
-
-def _save_selection(model_dir: Path, payload: dict) -> dict:
-    selection = _normalize_selection(payload)
-    _selection_path(model_dir).write_text(
-        json.dumps(selection, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    return selection
+def _poly_range_text(data: dict | None = None) -> str:
+    payload = data or {}
+    degrees = payload.get("poly_degrees")
+    if isinstance(degrees, (list, tuple)) and degrees:
+        first = degrees[0]
+        last = degrees[-1]
+        if first == last:
+            return f"Grad {first}"
+        return f"Grade {first}–{last}"
+    high = _clamp_poly_degree_max(payload.get("poly_degree_max"))
+    if high <= 1:
+        return "Grad 1"
+    return f"Grade 1–{high}"
 
 
 def _fmt_num(value, digits: int = 4) -> str:
@@ -247,11 +179,53 @@ def _empty_train_status() -> dict:
         "error": None,
         "run_id": None,
         "completed": [],
+        "trained": False,
     }
 
 
-def _train_status_path(model_dir: Path) -> Path:
-    return model_dir / TRAIN_STATUS_FILENAME
+def _has_trained_result(model_dir: Path) -> bool:
+    return (model_dir / RESULT_FILENAME).is_file() or (model_dir / MODEL_FILENAME).is_file()
+
+
+def _reset_training_outputs(model_dir: Path) -> list[str]:
+    deleted: list[str] = []
+    for entry in list(model_dir.iterdir()):
+        if entry.name in KEEP_ON_RESET:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+            deleted.append(entry.name + "/")
+        elif entry.is_file():
+            entry.unlink()
+            deleted.append(entry.name)
+    return sorted(deleted)
+
+
+def _status_key(model_dir: Path) -> str:
+    return str(model_dir.resolve())
+
+
+def _store_train_status(model_dir: Path, status: dict) -> None:
+    payload = deepcopy(status)
+    payload.pop("log_tail", None)
+    with _status_lock:
+        _train_status[_status_key(model_dir)] = payload
+
+
+def _load_train_status(model_dir: Path) -> dict:
+    with _status_lock:
+        stored = _train_status.get(_status_key(model_dir))
+    status = _empty_train_status()
+    if isinstance(stored, dict):
+        status.update(deepcopy(stored))
+    status["log_file"] = TRAIN_LOG_FILENAME
+    status["log_tail"] = _read_log_tail(model_dir)
+    return status
+
+
+def _clear_train_status(model_dir: Path) -> None:
+    with _status_lock:
+        _train_status.pop(_status_key(model_dir), None)
 
 
 def _train_log_path(model_dir: Path) -> Path:
@@ -269,33 +243,6 @@ def _read_log_tail(model_dir: Path, limit: int = LOG_TAIL_LIMIT) -> list[str]:
     return lines[-limit:]
 
 
-def _read_train_status_file(model_dir: Path) -> dict:
-    path = _train_status_path(model_dir)
-    if not path.is_file():
-        status = _empty_train_status()
-        status["log_tail"] = _read_log_tail(model_dir)
-        return status
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        status = _empty_train_status()
-        status["log_tail"] = _read_log_tail(model_dir)
-        return status
-    status = _empty_train_status()
-    if isinstance(payload, dict):
-        status.update(payload)
-    status["log_file"] = TRAIN_LOG_FILENAME
-    status["log_tail"] = _read_log_tail(model_dir)
-    return status
-
-
-def _write_train_status(model_dir: Path, status: dict) -> None:
-    payload = deepcopy(status)
-    payload.pop("log_tail", None)
-    path = _train_status_path(model_dir)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
-
-
 def _append_train_log(model_dir: Path, line: str) -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text = f"[{stamp}] {line}"
@@ -307,21 +254,13 @@ def _append_train_log(model_dir: Path, line: str) -> None:
 def _event_line(event: str, data: dict) -> str | None:
     target = data.get("target")
     if event == "run_start":
-        mins = data.get("min_per_category") or {}
-        min_text = ", ".join(f"{key}≥{value}" for key, value in mins.items() if value) or "keine"
-        pinned = ", ".join(data.get("pinned") or []) or "keine"
-        cv = data.get("cv")
-        folds = f", {data.get('cv_folds')} Folds" if cv in {"kfold", "random"} else ""
-        k_text = (
-            "Kennwerte=auto (8/12/16/20/24)"
-            if data.get("feature_k_mode") == "auto"
-            else f"Kennwerte={data.get('feature_k')}"
-        )
+        k_text = "Kennwerte=auto (" + "/".join(str(item) for item in AUTO_FEATURE_KS) + ")"
         return (
             f"Lauf {data.get('run_id')}: Ziel {target}, "
             f"n_train={data.get('n_train')}, "
-            f"Learner={data.get('learner')}, CV={cv}{folds}, "
-            f"{k_text}, fest: {pinned}, min.: {min_text}"
+            f"Polynom-Elastic-Net ({_poly_range_text(data)}), "
+            f"äußere CV=Leave-One-Path-Out, innere CV=zufälliger 5-Fold, "
+            f"{k_text}"
         )
     if event == "grid_start":
         return None
@@ -330,36 +269,50 @@ def _event_line(event: str, data: dict) -> str | None:
     if event == "cell_start":
         return (
             f"Starte {target} (n_train={data.get('n_train')}, "
-            f"Learner={data.get('learner')}, CV={data.get('cv')})"
+            f"{data.get('n_paths')} Pfade, Polynom-Elastic-Net, "
+            f"{_poly_range_text(data)}, "
+            f"außen Leave-One-Path-Out, innen zufälliger 5-Fold)"
         )
     if event == "cv_k":
         n_folds = data.get("n_folds") or data.get("n_paths")
-        return f"Kreuzvalidierung {target}: k={data.get('k')} über {n_folds} Folds"
+        degree = data.get("degree")
+        degree_text = f", Grad {degree}" if degree is not None else ""
+        return f"Äußere CV {target}: k={data.get('k')}{degree_text} über {n_folds} Pfade"
     if event == "cv_fold":
+        degree = data.get("degree")
+        degree_text = f", Grad {degree}" if degree is not None else ""
         return (
-            f"Fold {data.get('path_id')} bei k={data.get('k')}: "
-            f"RMSE={_fmt_num(data.get('rmse'))}, R²={_fmt_num(data.get('r2'))}, "
-            f"{data.get('n_features')} Merkmale"
+            f"Pfad {data.get('path_id')} bei k={data.get('k')}{degree_text}: "
+            f"{data.get('n_held')} Proben, RMSE={_fmt_num(data.get('rmse'))}, "
+            f"R²={_fmt_num(data.get('r2'))}, {data.get('n_features')} Merkmale"
         )
     if event == "cv_k_done":
-        return f"k={data.get('k')} abgeschlossen, mittlere CV-RMSE={_fmt_num(data.get('mean_rmse'))}"
-    if event == "cv_k_chosen":
-        mode = "automatisch" if data.get("feature_k_mode") == "auto" else "manuell"
+        degree = data.get("degree")
+        degree_text = f", Grad {degree}" if degree is not None else ""
         return (
-            f"Gewählte Kennwerte: {data.get('k')} ({mode}), "
+            f"k={data.get('k')}{degree_text} abgeschlossen, "
+            f"mittlere CV-RMSE={_fmt_num(data.get('mean_rmse'))}"
+        )
+    if event == "cv_k_chosen":
+        degree = data.get("degree")
+        degree_text = f", Polynomgrad {degree}" if degree is not None else ""
+        return (
+            f"Gewählt: k={data.get('k')}{degree_text}, "
             f"CV-RMSE={_fmt_num(data.get('mean_rmse'))}"
         )
     if event == "fit_final":
         selected = data.get("selected") or []
         names = ", ".join(str(item) for item in selected) if selected else "keine"
         return (
-            f"Finales Fit {target}: k={data.get('k')}, "
-            f"{data.get('n_features')} Merkmale: {names}"
+            f"Finales Fit {target}: k={data.get('k')}"
+            + (f", Grad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f", {data.get('n_features')} Merkmale: {names}"
         )
     if event == "cell_done":
         return (
-            f"Fertig {target}: k={data.get('k')}, "
-            f"CV-RMSE={_fmt_num(data.get('mean_cv_rmse') or data.get('mean_lopo_rmse'))}"
+            f"Fertig {target}: k={data.get('k')}"
+            + (f", Grad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f", CV-RMSE={_fmt_num(data.get('mean_cv_rmse') or data.get('mean_lopo_rmse'))}"
         )
     if event == "cell_error":
         return f"Fehler {target}: {data.get('error')}"
@@ -398,6 +351,7 @@ def _apply_train_event(status: dict, event: str, data: dict) -> dict:
         status["message"] = str(data.get("target") or "Training")
         current["target"] = data.get("target")
         current["k"] = None
+        current["degree"] = None
         current["fold"] = None
     elif event == "cell_start":
         status["phase"] = "Modell"
@@ -407,32 +361,49 @@ def _apply_train_event(status: dict, event: str, data: dict) -> dict:
         current["target"] = data.get("target")
     elif event == "cv_k":
         status["phase"] = "Kreuzvalidierung"
-        status["message"] = f"k={data.get('k')} · {data.get('n_folds')} Folds"
+        status["message"] = (
+            f"k={data.get('k')}"
+            + (f" · Grad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f" · äußere CV ({data.get('n_folds')} Pfade)"
+        )
         current["k"] = data.get("k")
+        current["degree"] = data.get("degree")
         current["fold"] = None
         progress["current"] = 0
         progress["total"] = int(data.get("n_folds") or 0)
-        progress["unit"] = "Folds"
+        progress["unit"] = "Pfade"
     elif event == "cv_fold":
         status["phase"] = "Kreuzvalidierung"
         status["message"] = (
-            f"Fold {data.get('path_id')} · k={data.get('k')} · RMSE={_fmt_num(data.get('rmse'))}"
+            f"Pfad {data.get('path_id')} · k={data.get('k')}"
+            + (f" · Grad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f" · {data.get('n_held')} Proben · RMSE={_fmt_num(data.get('rmse'))}"
         )
         current["k"] = data.get("k")
+        current["degree"] = data.get("degree")
         current["fold"] = data.get("path_id")
         progress["current"] = int(progress.get("current") or 0) + 1
         progress["total"] = int(data.get("n_folds") or progress.get("total") or 0)
-        progress["unit"] = "Folds"
+        progress["unit"] = "Pfade"
     elif event == "cv_k_done":
         status["phase"] = "Kreuzvalidierung"
-        status["message"] = f"k={data.get('k')} · mittlere RMSE={_fmt_num(data.get('mean_rmse'))}"
+        status["message"] = (
+            f"k={data.get('k')}"
+            + (f" · Grad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f" · mittlere RMSE={_fmt_num(data.get('mean_rmse'))}"
+        )
         current["k"] = data.get("k")
+        current["degree"] = data.get("degree")
+        current["fold"] = None
     elif event == "cv_k_chosen":
         status["phase"] = "Kennwerte"
         status["message"] = (
-            f"Gewählt: {data.get('k')} Kennwerte · CV-RMSE={_fmt_num(data.get('mean_rmse'))}"
+            f"Gewählt: k={data.get('k')}"
+            + (f" · Polynomgrad {data.get('degree')}" if data.get("degree") is not None else "")
+            + f" · CV-RMSE={_fmt_num(data.get('mean_rmse'))}"
         )
         current["k"] = data.get("k")
+        current["degree"] = data.get("degree")
         current["fold"] = None
     elif event == "fit_final":
         status["phase"] = "Finales Fit"
@@ -499,7 +470,7 @@ def _emit_train_event(model_dir: Path, status: dict, event: str, **data) -> dict
     if line:
         _append_train_log(model_dir, line)
     status = _apply_train_event(status, event, data)
-    _write_train_status(model_dir, status)
+    _store_train_status(model_dir, status)
     return status
 
 
@@ -515,7 +486,7 @@ def _live_training() -> tuple[bool, Path | None, str | None]:
 def _public_train_status(model_dir: Path | None) -> dict:
     if model_dir is None or not model_dir.is_dir():
         return _empty_train_status()
-    status = _read_train_status_file(model_dir)
+    status = _load_train_status(model_dir)
     alive, live_dir, live_run = _live_training()
     live_here = (
         alive
@@ -538,6 +509,7 @@ def _public_train_status(model_dir: Path | None) -> dict:
             status["error"] = "unterbrochen"
         if not status.get("finished_at"):
             status["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    status["trained"] = _has_trained_result(model_dir)
     return status
 
 
@@ -545,9 +517,10 @@ def _run_training_job(
     model_dir: Path,
     run_id: str,
     target: str,
+    poly_degree_max: int,
 ) -> None:
     global _train_thread, _train_model_dir, _train_run_id
-    existing = _read_train_status_file(model_dir)
+    existing = _load_train_status(model_dir)
     if existing.get("run_id") == run_id:
         status = existing
         status.pop("log_tail", None)
@@ -563,9 +536,6 @@ def _run_training_job(
         train_frame, roles = load_dataset(train_path)
         if target not in train_frame.columns:
             raise ValueError(f"Zielspalte fehlt im Training: {target}")
-        selection = _load_selection(model_dir)
-        columns, _has_categories = read_export_columns(train_path)
-        column_categories = {item["name"]: item["category"] for item in columns if item.get("name")}
         _append_train_log(model_dir, f"======== {run_id} ========")
         status = _emit_train_event(
             model_dir,
@@ -574,13 +544,11 @@ def _run_training_job(
             run_id=run_id,
             target=target,
             n_train=int(train_frame.shape[0]),
-            learner=selection.get("learner") or DEFAULT_LEARNER,
-            cv=selection.get("cv") or DEFAULT_CV,
-            cv_folds=selection.get("cv_folds") or DEFAULT_CV_FOLDS,
-            feature_k=selection.get("feature_k") or DEFAULT_FEATURE_K,
-            feature_k_mode=selection.get("feature_k_mode") or DEFAULT_FEATURE_K_MODE,
-            pinned=selection.get("pinned") or [],
-            min_per_category=selection.get("min_per_category") or {},
+            learner="polynomial",
+            cv=DEFAULT_CV,
+            cv_folds=DEFAULT_CV_FOLDS,
+            feature_k_mode="auto",
+            poly_degree_max=poly_degree_max,
         )
 
         def progress(event: str, **data) -> None:
@@ -591,14 +559,10 @@ def _run_training_job(
             train_frame,
             roles,
             targets=[target],
-            pinned=selection.get("pinned") or [],
-            min_per_category=selection.get("min_per_category") or {},
-            column_categories=column_categories,
-            learner=selection.get("learner") or DEFAULT_LEARNER,
-            cv=selection.get("cv") or DEFAULT_CV,
-            cv_folds=selection.get("cv_folds") or DEFAULT_CV_FOLDS,
-            feature_k=selection.get("feature_k") or DEFAULT_FEATURE_K,
-            feature_k_mode=selection.get("feature_k_mode") or DEFAULT_FEATURE_K_MODE,
+            learner="polynomial",
+            cv=DEFAULT_CV,
+            cv_folds=DEFAULT_CV_FOLDS,
+            poly_degree_max=poly_degree_max,
             progress=progress,
         )
         path = save_run(model_dir, result)
@@ -620,17 +584,17 @@ def _run_training_job(
 def _train_column_groups(model_dir: Path) -> dict:
     train_path = model_dir / TRAIN_FILENAME
     if not train_path.is_file():
-        return {"groups": [], "n_rows": None, "error": f"{TRAIN_FILENAME} fehlt."}
+        return {"columns": [], "n_rows": None, "error": f"{TRAIN_FILENAME} fehlt."}
     try:
         columns, _has_categories = read_export_columns(train_path)
         frame, _roles = load_dataset(train_path)
         return {
-            "groups": group_columns_by_category(columns),
+            "columns": columns,
             "n_rows": int(frame.shape[0]),
             "error": None,
         }
     except Exception as exc:
-        return {"groups": [], "n_rows": None, "error": str(exc)}
+        return {"columns": [], "n_rows": None, "error": str(exc)}
 
 
 def _excel_summary(path: Path | None) -> dict | None:
@@ -720,18 +684,37 @@ def inject_nav_context():
 @app.get("/")
 def index():
     train_overview = None
-    selection = _empty_selection()
     if ACTIVE_MODEL_DIR is not None and ACTIVE_MODEL_DIR.is_dir():
         train_overview = _train_column_groups(ACTIVE_MODEL_DIR)
-        selection = _load_selection(ACTIVE_MODEL_DIR)
     return render_template(
         "index.html",
-        active_page="evaluate",
+        active_page="trainieren",
         model_name=ACTIVE_MODEL_DIR.name if ACTIVE_MODEL_DIR else None,
         train_overview=train_overview,
-        selection=selection,
-        learner_options=LEARNER_OPTIONS,
         cv_options=CV_OPTIONS,
+    )
+
+
+@app.get("/testen")
+def testen():
+    test_overview = None
+    trained = False
+    if ACTIVE_MODEL_DIR is not None and ACTIVE_MODEL_DIR.is_dir():
+        trained = _has_trained_result(ACTIVE_MODEL_DIR)
+        test_path = _active_test_path()
+        if test_path is None:
+            test_overview = {"error": f"{TEST_FILENAME} fehlt.", "n_rows": None}
+        else:
+            try:
+                test_overview = _excel_summary(test_path)
+            except Exception as exc:
+                test_overview = {"error": str(exc), "n_rows": None}
+    return render_template(
+        "testen.html",
+        active_page="testen",
+        model_name=ACTIVE_MODEL_DIR.name if ACTIVE_MODEL_DIR else None,
+        test_overview=test_overview,
+        trained=trained,
     )
 
 
@@ -809,15 +792,6 @@ def upload_split(kind):
     return jsonify(ok=True, kind=kind, dataset=summary, model=_model_payload(ACTIVE_MODEL_DIR))
 
 
-@app.post("/api/models/selection")
-def save_selection():
-    if ACTIVE_MODEL_DIR is None or not ACTIVE_MODEL_DIR.is_dir():
-        return jsonify(error="Zuerst einen Modellordner laden."), 400
-    payload = request.get_json(silent=True) or {}
-    selection = _save_selection(ACTIVE_MODEL_DIR, payload)
-    return jsonify(ok=True, selection=selection)
-
-
 @app.post("/api/train")
 def train():
     global _train_thread, _train_model_dir, _train_run_id
@@ -836,6 +810,10 @@ def train():
     if alive:
         name = live_dir.name if live_dir else "unbekannt"
         return jsonify(error=f"Es läuft bereits ein Training ({name})."), 409
+    if _has_trained_result(ACTIVE_MODEL_DIR):
+        return jsonify(error="Modell ist bereits trainiert. Bitte zuerst zurücksetzen."), 409
+    payload = request.get_json(silent=True) or {}
+    poly_degree_max = _clamp_poly_degree_max(payload.get("poly_degree_max"))
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_dir = ACTIVE_MODEL_DIR
     starter = _empty_train_status()
@@ -846,10 +824,10 @@ def train():
     starter["started_at"] = datetime.now().isoformat(timespec="seconds")
     starter["current"] = {"target": target, "k": None, "fold": None}
     starter["progress"] = {"current": 0, "total": 0, "unit": ""}
-    _write_train_status(model_dir, starter)
+    _store_train_status(model_dir, starter)
     thread = threading.Thread(
         target=_run_training_job,
-        args=(model_dir, run_id, target),
+        args=(model_dir, run_id, target, poly_degree_max),
         name=f"train-{model_dir.name}-{run_id}",
         daemon=True,
     )
@@ -859,6 +837,25 @@ def train():
         _train_run_id = run_id
     thread.start()
     return jsonify(ok=True, run_id=run_id, log_file=TRAIN_LOG_FILENAME)
+
+
+@app.post("/api/train/reset")
+def reset_train():
+    if ACTIVE_MODEL_DIR is None or not ACTIVE_MODEL_DIR.is_dir():
+        return jsonify(error="Zuerst einen Modellordner laden."), 400
+    model_dir = ACTIVE_MODEL_DIR
+    alive, live_dir, _live_run = _live_training()
+    if alive and live_dir is not None and live_dir.resolve() == model_dir.resolve():
+        return jsonify(error="Training läuft noch und kann nicht zurückgesetzt werden."), 409
+    if not _has_trained_result(model_dir):
+        return jsonify(error="Kein gespeichertes Training zum Zurücksetzen."), 400
+    deleted = _reset_training_outputs(model_dir)
+    _clear_train_status(model_dir)
+    return jsonify(
+        ok=True,
+        deleted=deleted,
+        status=_public_train_status(model_dir),
+    )
 
 
 @app.get("/api/train/status")

@@ -34,6 +34,7 @@ from run_path_features import (
     build_path_fields_for_experiment,
     list_path_characteristic_keys,
     normalize_path_fields,
+    path_length_mm,
     serialize_path_fields,
 )
 
@@ -51,6 +52,8 @@ WELD_CROPPED_CENTER_DURATION_S = 10.0
 CROPPED_SCAN_FILENAME = "cropped_scan.json"
 CROPPED_CENTER_FILENAME = "cropped_center.json"
 CROPPED_CENTER_MARGIN_MM = 5.0
+HYPERBOLA_2D_FILENAME = "hyperbola_2d.json"
+SURFACE_HYPERBOLA_COEFF_KEYS = ("a", "b", "c", "d", "e", "p", "q")
 CROPPED_WELD_FILENAME = "cropped_weld.h5"
 POWER_H5_FILENAME = "power.h5"
 CHARACTERISTICS_FILENAME = "characteristics.json"
@@ -374,27 +377,35 @@ def clear_characteristics_sections(
     if not clear_scan and not clear_weld:
         return []
 
+    cleared: list[str] = []
+    if clear_scan:
+        hyperbola_path = Path(output_folder) / SCAN_SUBDIR / HYPERBOLA_2D_FILENAME
+        if hyperbola_path.is_file():
+            hyperbola_path.unlink()
+            cleared.append(f"{SCAN_SUBDIR}/{HYPERBOLA_2D_FILENAME}")
+
     char_path = Path(output_folder) / CHARACTERISTICS_FILENAME
     if not char_path.is_file():
-        return []
+        return cleared
 
     existing_doc = None
     try:
         existing_doc = load_characteristics(char_path)
     except ValueError:
-        existing_doc = {"scan": {}, "weld": [], "path": {}}
+        existing_doc = {"scan": {}, "weld": [], "path": {}, "mixed": {}}
 
     scan_fields = {} if clear_scan else dict(existing_doc.get("scan") or {})
     weld_rows = [] if clear_weld else list(existing_doc.get("weld") or [])
     path_fields = dict(existing_doc.get("path") or {})
+    mixed_fields = {} if clear_weld else dict(existing_doc.get("mixed") or {})
 
-    cleared: list[str] = []
     if clear_scan:
         cleared.append(f"{CHARACTERISTICS_FILENAME}#scan")
     if clear_weld:
         cleared.append(f"{CHARACTERISTICS_FILENAME}#weld")
+        cleared.append(f"{CHARACTERISTICS_FILENAME}#mixed")
 
-    if not scan_fields and not weld_rows and not path_fields:
+    if not scan_fields and not weld_rows and not path_fields and not mixed_fields:
         char_path.unlink()
         return cleared
 
@@ -403,6 +414,7 @@ def clear_characteristics_sections(
         scan_fields=scan_fields,
         weld_rows=weld_rows,
         path_fields=path_fields,
+        mixed_fields=mixed_fields,
     )
     return cleared
 
@@ -925,11 +937,7 @@ def _weighted_mean_abs(values: np.ndarray, weights: np.ndarray) -> float | None:
     return float(numer / denom)
 
 
-HYPERBOLA_POLE_OFFSET_FRACTIONS = np.asarray(
-    [0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0],
-    dtype=float,
-)
-HYPERBOLA_POLE_MIN_OFFSET_MM = 20.0
+HYPERBOLA_POLE_OFFSET_FRACTIONS = np.arange(0.5, 5.0 + 1e-9, 0.25)
 SURFACE_HYPERBOLA_FIT_MAX_POINTS = 12000
 CURVATURE_ABS_SAMPLE_COUNT = 401
 
@@ -938,8 +946,7 @@ def _hyperbola_pole_candidates(t_min: float, t_max: float) -> np.ndarray:
     span = float(t_max) - float(t_min)
     if span <= 0:
         return np.asarray([], dtype=float)
-    offsets = np.maximum(span * HYPERBOLA_POLE_OFFSET_FRACTIONS, HYPERBOLA_POLE_MIN_OFFSET_MM)
-    offsets = np.unique(offsets)
+    offsets = span * HYPERBOLA_POLE_OFFSET_FRACTIONS
     return np.concatenate([t_min - offsets, t_max + offsets])
 
 
@@ -953,8 +960,8 @@ def fit_profile_hyperbola(
     Fit a rectangular hyperbola with linear trend:
         z(t) = a + b * t + c / (t - d)
 
-    The pole ``d`` is searched at least 20 mm outside the measured interval so
-    the curve stays smooth over the profile. Returns None if the fit is not possible.
+    The pole ``d`` is searched at 50 % to 500 % of the measured span outside
+    the interval. Returns None if the fit is not possible.
     """
     prepared = _collapse_profile_fit_points(t_mm, z_mm, min_points=4)
     if prepared is None:
@@ -1321,8 +1328,8 @@ def compute_surface_curvature(scan_document: dict) -> dict | None:
 
         z(x, y) = a + b x + c y + d / (x - p) + e / (y - q)
 
-    Poles ``p`` and ``q`` are searched at least 20 mm outside the measured
-    x- and y-intervals.
+    Poles ``p`` and ``q`` are searched at 50 % to 500 % of the measured
+    x- and y-spans outside the intervals.
     Coordinates are in mm; returned curvature is converted to 1/m (κ_m = κ_mm * 1000).
     Gaussian curvature K is likewise an area-weighted mean of |K| over the valid points.
     """
@@ -1446,6 +1453,73 @@ def compute_surface_curvature(scan_document: dict) -> dict | None:
     if gaussian is not None and np.isfinite(gaussian):
         result["gaussian_1_per_m2"] = round(float(gaussian) * 1_000_000.0, 9)
     return result
+
+
+def export_surface_hyperbola(surface: dict) -> dict:
+    document = {}
+    for key in (
+        *SURFACE_HYPERBOLA_COEFF_KEYS,
+        "r2",
+        "rmse",
+        "formula",
+        "point_count",
+        "curvature_1_per_m",
+        "gaussian_1_per_m2",
+        "curvature_source",
+    ):
+        if key in surface:
+            document[key] = surface[key]
+    return document
+
+
+def load_surface_hyperbola(path: Path) -> dict:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict):
+        raise ValueError("hyperbola_2d.json hat kein Objekt.")
+    coeffs = {}
+    for key in SURFACE_HYPERBOLA_COEFF_KEYS:
+        value = document.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"hyperbola_2d.json: Koeffizient {key} fehlt oder ist ungültig.") from None
+        if not np.isfinite(number):
+            raise ValueError(f"hyperbola_2d.json: Koeffizient {key} ist nicht endlich.")
+        coeffs[key] = number
+    coeffs.update({key: document[key] for key in document if key not in coeffs})
+    return coeffs
+
+
+def scan_document_with_surface_hyperbola(scan_document: dict, surface: dict) -> dict:
+    """Replace z with the fitted 2D hyperbola on valid cropped_center points."""
+    profiles = scan_document.get("profiles") or []
+    if not profiles:
+        raise ValueError("Keine Profile für die 2D-Hyperbel-Heatmap.")
+    try:
+        a, b, c, d, e, pole_p, pole_q = (float(surface[key]) for key in SURFACE_HYPERBOLA_COEFF_KEYS)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("2D-Hyperbel-Koeffizienten unvollständig.") from exc
+
+    x_mm = np.asarray(profiles[0].get("x_mm") or [], dtype=float)
+    if x_mm.size == 0:
+        raise ValueError("Keine x-Werte für die 2D-Hyperbel-Heatmap.")
+    y_mm = _profile_y_mm_values(profiles)
+    _z_stack, valid_mask = _stack_profile_z_and_valid_mask(profiles)
+    xx, yy = np.meshgrid(x_mm, y_mm)
+    u = xx - pole_p
+    v = yy - pole_q
+    near = (np.abs(u) < 1e-9) | (np.abs(v) < 1e-9)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z_fit = a + b * xx + c * yy + d / u + e / v
+    z_fit = np.where(valid_mask & np.isfinite(z_fit) & ~near, z_fit, 0.0)
+
+    fitted_profiles = []
+    for index, profile in enumerate(profiles):
+        fitted = dict(profile)
+        fitted["z_mm"] = np.asarray(z_fit[index], dtype=float).tolist()
+        fitted_profiles.append(fitted)
+    return {**scan_document, "profiles": fitted_profiles}
 
 
 def _lstsq_surface_hyperbola(
@@ -1686,6 +1760,15 @@ SCAN_CHARACTERISTIC_FIELDS = (
     "curvature_surface_gaus",
 )
 
+MIXED_CHARACTERISTIC_FIELDS = (
+    "weld_time_s",
+    "energy_J",
+    "energy_per_mm",
+    "path_length_mm",
+    "wire_length_mm",
+    "travel_speed_mm_s",
+)
+
 WELD_CURRENT_QUANTITY = "current"
 WELD_VOLTAGE_QUANTITY = "voltage"
 WELD_POWER_QUANTITY = "power"
@@ -1756,12 +1839,17 @@ def list_all_characteristic_keys() -> tuple[str, ...]:
     """Flat, stable-order list of every characteristics.json metric key."""
     return (
         *SCAN_CHARACTERISTIC_FIELDS,
+        *MIXED_CHARACTERISTIC_FIELDS,
         *WELD_CURRENT_CHARACTERISTIC_FIELDS,
         *WELD_VOLTAGE_CHARACTERISTIC_FIELDS,
         *WELD_POWER_CHARACTERISTIC_FIELDS,
         *WELD_DURATION_CHARACTERISTIC_FIELDS,
         *PATH_CHARACTERISTIC_FIELDS,
     )
+
+
+def list_mixed_characteristic_keys() -> tuple[str, ...]:
+    return MIXED_CHARACTERISTIC_FIELDS
 
 
 def _json_safe_characteristic_value(value):
@@ -1774,6 +1862,81 @@ def _json_safe_characteristic_value(value):
     if not np.isfinite(number):
         return None
     return number
+
+
+def _trapz(values: np.ndarray, time_s: np.ndarray) -> float | None:
+    y = np.asarray(values, dtype=np.float64)
+    t = np.asarray(time_s, dtype=np.float64)
+    count = min(y.size, t.size)
+    if count < 2:
+        return None
+    y = y[:count]
+    t = t[:count]
+    mask = np.isfinite(y) & np.isfinite(t)
+    if int(np.count_nonzero(mask)) < 2:
+        return None
+    if hasattr(np, "trapezoid"):
+        energy = float(np.trapezoid(y[mask], t[mask]))
+    else:
+        energy = float(np.trapz(y[mask], t[mask]))
+    if not np.isfinite(energy):
+        return None
+    return energy
+
+
+def _m_per_min_to_mm(speed_m_per_min: float | None, time_s: float | None) -> float | None:
+    if speed_m_per_min is None or time_s is None:
+        return None
+    if not np.isfinite(speed_m_per_min) or not np.isfinite(time_s):
+        return None
+    if speed_m_per_min <= 0 or time_s <= 0:
+        return None
+    return float(speed_m_per_min) * float(time_s) * (1000.0 / 60.0)
+
+
+def build_mixed_characteristic_fields(
+    *,
+    weld_time_s: float | None = None,
+    energy_J: float | None = None,
+    path_id: str | None = None,
+    wfs_m_per_min: float | None = None,
+    ws_m_per_min: float | None = None,
+) -> dict[str, float]:
+    fields: dict[str, float] = {}
+    time_s = _json_safe_characteristic_value(weld_time_s)
+    energy = _json_safe_characteristic_value(energy_J)
+    length = path_length_mm(path_id)
+    if length is None:
+        length = _m_per_min_to_mm(ws_m_per_min, time_s)
+    if time_s is not None and time_s > 0:
+        fields["weld_time_s"] = round(time_s, 6)
+    if energy is not None:
+        fields["energy_J"] = round(energy, 6)
+    if length is not None:
+        fields["path_length_mm"] = round(length, 6)
+    if energy is not None and length is not None and length > 0:
+        fields["energy_per_mm"] = round(energy / length, 9)
+    wire = _m_per_min_to_mm(wfs_m_per_min, time_s)
+    if wire is not None:
+        fields["wire_length_mm"] = round(wire, 6)
+    if length is not None and time_s is not None and time_s > 0:
+        fields["travel_speed_mm_s"] = round(length / time_s, 6)
+    return fields
+
+
+def _serialize_mixed_characteristics(fields: dict) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key in MIXED_CHARACTERISTIC_FIELDS:
+        value = _json_safe_characteristic_value((fields or {}).get(key))
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _normalize_mixed_characteristics(raw) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    return _serialize_mixed_characteristics(raw)
 
 
 def _normalize_scan_characteristics(raw) -> dict[str, float]:
@@ -3551,6 +3714,7 @@ def write_characteristics_file(
     scan_fields: dict | None = None,
     weld_rows: list[dict] | None = None,
     path_fields: dict | None = None,
+    mixed_fields: dict | None = None,
 ) -> None:
     payload = {
         "version": 2,
@@ -3560,6 +3724,9 @@ def write_characteristics_file(
     serialized_path = serialize_path_fields(path_fields or {})
     if serialized_path:
         payload["path"] = serialized_path
+    serialized_mixed = _serialize_mixed_characteristics(mixed_fields or {})
+    if serialized_mixed:
+        payload["mixed"] = serialized_mixed
     output_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -3577,6 +3744,7 @@ def load_characteristics(path: Path) -> dict:
 
     scan_fields = _normalize_scan_characteristics(document.get("scan"))
     path_fields = normalize_path_fields(document.get("path"))
+    mixed_fields = _normalize_mixed_characteristics(document.get("mixed"))
     weld_rows: list[dict] = []
     for item in document.get("weld") or []:
         if not isinstance(item, dict):
@@ -3596,6 +3764,7 @@ def load_characteristics(path: Path) -> dict:
         "scan": scan_fields,
         "weld": weld_rows,
         "path": path_fields,
+        "mixed": mixed_fields,
     }
 
 
@@ -4053,6 +4222,13 @@ def generate_analyzing_weld_h5(
     )
     active_start_index = start_index
     active_end_index = end_index
+    active_time_s = time_s[active_start_index:active_end_index]
+    active_current_a = current_a[active_start_index:active_end_index]
+    active_voltage_v = voltage_v[active_start_index:active_end_index]
+    active_duration_s = (
+        float(active_time_s[-1] - active_time_s[0]) if active_time_s.size else 0.0
+    )
+    active_energy_J = _trapz(active_voltage_v * active_current_a, active_time_s)
     start_index, end_index = _crop_center_time_window(time_s, start_index, end_index)
     weld_start_time_s = float(time_s[start_index])
     weld_end_time_s = float(time_s[end_index - 1])
@@ -4075,6 +4251,10 @@ def generate_analyzing_weld_h5(
         "weld_end_time_s": round(weld_end_time_s, 6),
         "active_weld_start_time_s": round(float(time_s[active_start_index]), 6),
         "active_weld_end_time_s": round(float(time_s[active_end_index - 1]), 6),
+        "active_weld_duration_s": round(float(active_duration_s), 6),
+        "active_weld_energy_J": (
+            None if active_energy_J is None else round(float(active_energy_J), 6)
+        ),
         "cropped_center_duration_s": WELD_CROPPED_CENTER_DURATION_S,
         "threshold_a": round(threshold_a, 6),
         "sample_count": int(trimmed_time_s.size),
@@ -4177,10 +4357,15 @@ def run_analyze_scan(
 
     if options["characteristics"]:
         surface = compute_surface_curvature(kennwerte_source)
+        hyperbola_path = scan_dir / HYPERBOLA_2D_FILENAME
         if surface is not None:
             result["curvature_surface_mean"] = surface["curvature_1_per_m"]
             if surface.get("gaussian_1_per_m2") is not None:
                 result["curvature_surface_gaus"] = surface["gaussian_1_per_m2"]
+            _dump_json(hyperbola_path, export_surface_hyperbola(surface))
+            result["hyperbola_2d_file"] = HYPERBOLA_2D_FILENAME
+        elif hyperbola_path.is_file():
+            hyperbola_path.unlink()
 
     return result
 
@@ -4220,6 +4405,8 @@ def run_analyze_weld(
         "weld_duration_s": document["duration_s"],
         "weld_start_time_s": document["weld_start_time_s"],
         "weld_end_time_s": document["weld_end_time_s"],
+        "active_weld_duration_s": document.get("active_weld_duration_s"),
+        "weld_energy_J": document.get("active_weld_energy_J"),
         "weld_idle_baseline_a": document["idle_baseline_a"],
         "weld_threshold_a": document["threshold_a"],
         "source_h5_file": weld_path.name,
@@ -4360,6 +4547,7 @@ def run_analyze(
     scan_speed_mm_s: float | None = None,
     scan_duration_s: float | None = None,
     weld_speed_m_per_min: float | None = None,
+    wire_speed_m_per_min: float | None = None,
     scan_generate_options: dict[str, bool] | None = None,
     weld_generate_options: dict[str, bool] | None = None,
     output_folder: Path | None = None,
@@ -4477,12 +4665,28 @@ def run_analyze(
         if computed_path:
             path_fields = computed_path
 
-        if scan_fields or weld_rows or path_fields:
+        existing_mixed = dict(existing_doc.get("mixed") or {}) if existing_doc else {}
+        weld_time = result.get("active_weld_duration_s")
+        energy = result.get("weld_energy_J")
+        if weld_time is None:
+            weld_time = existing_mixed.get("weld_time_s")
+        if energy is None:
+            energy = existing_mixed.get("energy_J")
+        mixed_fields = build_mixed_characteristic_fields(
+            weld_time_s=weld_time,
+            energy_J=energy,
+            path_id=path_id,
+            wfs_m_per_min=wire_speed_m_per_min,
+            ws_m_per_min=weld_speed_m_per_min,
+        )
+
+        if scan_fields or weld_rows or path_fields or mixed_fields:
             write_characteristics_file(
                 char_path,
                 scan_fields=scan_fields,
                 weld_rows=weld_rows,
                 path_fields=path_fields,
+                mixed_fields=mixed_fields,
             )
             result["characteristics_file"] = CHARACTERISTICS_FILENAME
         elif char_path.is_file():

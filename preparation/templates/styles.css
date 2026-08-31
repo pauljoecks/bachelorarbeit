@@ -1629,14 +1629,6 @@ body {
   vertical-align: middle;
 }
 
-.analyzing-value-table td.analyzing-value-category {
-  padding: 0.4rem 1rem;
-  color: #c7ddf2;
-  border-bottom: 1px solid #c7ddf2;
-  white-space: nowrap;
-  vertical-align: middle;
-}
-
 .analyzing-value-table td.analyzing-value-cell {
   padding: 0.4rem 1rem;
   color: #e8f1fa;

@@ -85,6 +85,19 @@ def list_path_characteristic_keys() -> tuple[str, ...]:
     return PATH_CHARACTERISTIC_FIELDS
 
 
+def path_length_mm(path_id: str | None, step_mm: float = STEP_MM) -> float | None:
+    normalized = str(path_id or "").strip().upper()
+    if normalized not in PATH_IDS:
+        return None
+    try:
+        length = float(_cached_segments(normalized, float(step_mm))["length_mm"])
+    except (ValueError, FileNotFoundError, KeyError, TypeError):
+        return None
+    if not np.isfinite(length) or length <= 0:
+        return None
+    return length
+
+
 def _load_pattern_points(path_id: str) -> np.ndarray:
     normalized = str(path_id or "").strip().upper()
     if normalized not in PATH_IDS:

@@ -330,7 +330,7 @@ body {
   }
 }
 
-.category-stack {
+.columns-stack {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -376,9 +376,29 @@ body {
 }
 
 .settings-select:focus-visible,
-.settings-input:focus-visible {
+.settings-input:focus-visible,
+.settings-range:focus-visible {
   outline: 2px solid #407fb7;
   outline-offset: 1px;
+}
+
+.settings-range {
+  width: 100%;
+  margin: 0.15rem 0 0;
+  accent-color: #407fb7;
+}
+
+.settings-range-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 0.2rem;
+  font-size: 0.75rem;
+  color: #8ebae5;
+}
+
+.settings-static {
+  color: #e8f1fa;
+  line-height: 1.45;
 }
 
 .train-column {
@@ -418,6 +438,26 @@ body {
 .train-button:focus-visible {
   outline: 2px solid #407fb7;
   outline-offset: 1px;
+}
+
+.train-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.train-button-reset {
+  padding: 0.55rem 0.85rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #407fb7;
+  background: #e8f1fa;
+}
+
+.train-button-reset:hover:not(:disabled) {
+  background: #407fb7;
+  color: #ffffff;
+  border-color: #407fb7;
 }
 
 .status-panel {
@@ -532,69 +572,19 @@ body {
   word-break: break-word;
 }
 
-.category-panel {
+.columns-panel {
   border: 1px solid #c7ddf2;
   border-radius: 0.75rem;
   background: #00549f;
   overflow: hidden;
 }
 
-.category-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+.columns-panel .input-table thead th {
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid #c7ddf2;
-}
-
-.category-panel h2 {
-  margin: 0;
-  padding: 0;
-  font-size: 0.95rem;
   font-weight: 600;
   color: #c7ddf2;
-  border: none;
-}
-
-.category-min {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  color: #c7ddf2;
-  font-size: 0.85rem;
-  white-space: nowrap;
-}
-
-.category-min-input {
-  width: 3.5rem;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid #8ebae5;
-  border-radius: 0.35rem;
-  font: inherit;
-  color: #407fb7;
-  background: #e8f1fa;
-}
-
-.pin-label {
-  display: inline-flex;
-  align-items: center;
-}
-
-.pin-na {
-  color: #c7ddf2;
-}
-
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  border-bottom: 1px solid #c7ddf2;
+  text-align: left;
 }
 
 .status.success {
@@ -623,19 +613,8 @@ body {
   white-space: nowrap;
 }
 
-.input-table thead th {
-  color: #c7ddf2;
-  font-weight: 600;
-  background: #00549f;
-}
-
-.input-table tbody th {
-  font-weight: 600;
-  color: #e8f1fa;
-}
-
 .input-table tbody td {
-  color: #c7ddf2;
+  color: #e8f1fa;
 }
 
 .input-table tbody tr:last-child th,

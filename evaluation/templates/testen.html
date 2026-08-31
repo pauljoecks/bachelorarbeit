@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Testen · evaluation{% endblock %}
+
+{% block content %}
+{% if not model_name %}
+<p class="status">Oben einen Modellordner laden.</p>
+{% elif test_overview and test_overview.error %}
+<section class="inputs">
+  <p class="lede">{{ model_name }}</p>
+  <p class="status error">{{ test_overview.error }}</p>
+  {% if not trained %}
+  <p class="status">Noch kein trainiertes Modell. Zuerst unter Trainieren trainieren.</p>
+  {% endif %}
+</section>
+{% else %}
+<section class="inputs">
+  <p class="lede">
+    {{ model_name }}
+    {% if test_overview and test_overview.n_rows is not none %}
+    · {{ test_overview.n_rows }} Zeilen in test.xlsx
+    {% endif %}
+  </p>
+  {% if not trained %}
+  <p class="status">Noch kein trainiertes Modell. Zuerst unter Trainieren trainieren.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
